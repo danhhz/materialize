@@ -15,7 +15,6 @@ use differential_dataflow::hashable::Hashable;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::{collection, AsCollection, Collection};
 use log::warn;
-use timely::dataflow::operators::unordered_input::UnorderedInput;
 use timely::dataflow::operators::Map;
 use timely::dataflow::scopes::Child;
 use timely::dataflow::Scope;
@@ -34,12 +33,12 @@ use crate::logging::materialized::Logger;
 use crate::operator::{CollectionExt, StreamExt};
 use crate::render::context::Context;
 use crate::render::RenderState;
-use crate::server::LocalInput;
 use crate::source::SourceConfig;
 use crate::source::{
     self, FileSourceReader, KafkaSourceReader, KinesisSourceReader, PostgresSourceReader,
     PubNubSourceReader, S3SourceReader,
 };
+use crate::table::Durability;
 
 impl<'g, G> Context<Child<'g, G, G::Timestamp>, MirRelationExpr, Row, Timestamp>
 where
@@ -79,11 +78,13 @@ where
         // This has a lot of potential for improvement in the near future.
         match src.connector.clone() {
             SourceConnector::Local => {
-                let ((handle, capability), stream) = scope.new_unordered_input();
-                render_state
-                    .local_inputs
-                    .insert(src_id, LocalInput { handle, capability });
-                let err_collection = Collection::empty(scope);
+                let durability = match src_id.is_system() {
+                    // System tables repopulate themselves on restart.
+                    true => Durability::Ephemeral,
+                    false => Durability::Durable,
+                };
+                let (stream, err_collection) =
+                    render_state.tables.new_table(scope, src_id, durability);
                 self.collections.insert(
                     MirRelationExpr::global_get(src_id, src.bare_desc.typ().clone()),
                     (stream.as_collection(), err_collection),

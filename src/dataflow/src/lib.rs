@@ -18,6 +18,7 @@ mod operator;
 mod render;
 mod server;
 mod sink;
+mod table;
 
 pub mod logging;
 pub mod source;

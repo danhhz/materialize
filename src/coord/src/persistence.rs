@@ -7,12 +7,16 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-/// `PersistentTables` is a wrapper that encapsulates what the Coordinator needs
-/// to do to properly write data to persistent storage.
-///
-/// The intention here is to wrap the WAL and Compacter interactions in a simple
-/// API that insulates the Coordinator against potential errors and allows us to
-/// disable table persistence after any error.
+// WIP
+#![allow(dead_code)]
+
+//! `PersistentTables` is a wrapper that encapsulates what the Coordinator needs
+//! to do to properly write data to persistent storage.
+//!
+//! The intention here is to wrap the WAL and Compacter interactions in a simple
+//! API that insulates the Coordinator against potential errors and allows us to
+//! disable table persistence after any error.
+
 use std::path::PathBuf;
 
 use log::{debug, error};

@@ -67,7 +67,6 @@ use sql::plan::{
     CopyFormat, CreateSourcePlan, IndexOption, IndexOptionName, MutationKind, Params, PeekWhen,
     Plan, PlanContext,
 };
-use storage::Message as PersistedMessage;
 use transform::Optimizer;
 
 use self::arrangement_state::{ArrangementFrontiers, Frontiers};
@@ -79,7 +78,7 @@ use crate::command::{
     Cancelled, Command, ExecuteResponse, Response, StartupMessage, StartupResponse,
 };
 use crate::error::CoordError;
-use crate::persistence::{PersistenceConfig, PersistentTables};
+use crate::persistence::PersistenceConfig;
 use crate::session::{
     EndTransactionAction, PreparedStatement, Session, TransactionOps, TransactionStatus, WriteOp,
 };
@@ -197,8 +196,8 @@ pub struct Coordinator {
     /// A map from connection ID to metadata about that connection for all
     // active connections.
     active_conns: HashMap<u32, ConnMeta>,
-    /// Map of all persisted tables.
-    persisted_tables: Option<PersistentTables>,
+    // /// Map of all persisted tables.
+    // persisted_tables: Option<PersistentTables>,
 }
 
 /// Metadata about an active connection.
@@ -315,43 +314,7 @@ impl Coordinator {
 
         for entry in entries {
             match entry.item() {
-                CatalogItem::View(_) => (),
-                CatalogItem::Table(_) => {
-                    // TODO gross hack for now
-                    if !entry.id().is_system() {
-                        if let Some(tables) = &mut self.persisted_tables {
-                            if let Some(messages) = tables.resume(entry.id()) {
-                                let mut updates = vec![];
-                                for persisted_message in messages.into_iter() {
-                                    match persisted_message {
-                                        PersistedMessage::Progress(time) => {
-                                            // Send the messages accumulated so far + update
-                                            // progress
-                                            // TODO: I think we need to avoid downgrading capabilities until
-                                            // all rows have been sent so the table is not visible for reads
-                                            // before being fully reloaded.
-                                            let updates = std::mem::replace(&mut updates, vec![]);
-                                            if !updates.is_empty() {
-                                                self.broadcast(SequencedCommand::Insert {
-                                                    id: entry.id(),
-                                                    updates,
-                                                });
-                                                self.broadcast(
-                                                    SequencedCommand::AdvanceAllLocalInputs {
-                                                        advance_to: time,
-                                                    },
-                                                );
-                                            }
-                                        }
-                                        PersistedMessage::Data(update) => {
-                                            updates.push(update);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                CatalogItem::View(_) | CatalogItem::Table(_) => (),
                 CatalogItem::Sink(sink) => {
                     let builder = match &sink.connector {
                         SinkConnectorState::Pending(builder) => builder,
@@ -501,9 +464,6 @@ impl Coordinator {
                         > self.closed_up_to / self.logging_granularity.unwrap()
             {
                 if next_ts > self.closed_up_to {
-                    if let Some(tables) = &mut self.persisted_tables {
-                        tables.write_progress(next_ts);
-                    }
                     self.broadcast(SequencedCommand::AdvanceAllLocalInputs {
                         advance_to: next_ts,
                     });
@@ -958,9 +918,6 @@ impl Coordinator {
             .retain(|(_, frontier)| frontier != &Antichain::new());
         if !self.since_updates.is_empty() {
             let since_updates = mem::take(&mut self.since_updates);
-            if let Some(tables) = &mut self.persisted_tables {
-                tables.allow_compaction(&since_updates);
-            }
             self.broadcast(SequencedCommand::AllowCompaction(since_updates));
         }
     }
@@ -1560,9 +1517,6 @@ impl Coordinator {
             .await
         {
             Ok(_) => {
-                if let Some(tables) = &mut self.persisted_tables {
-                    tables.create(table_id);
-                }
                 let df = self.dataflow_builder().build_index_dataflow(index_id);
                 self.ship_dataflow(df).await?;
                 Ok(ExecuteResponse::CreatedTable { existed: false })
@@ -2021,10 +1975,6 @@ impl Coordinator {
                                     timestamp,
                                 })
                                 .collect();
-
-                            if let Some(tables) = &mut self.persisted_tables {
-                                tables.write(id, &updates);
-                            }
                             self.broadcast(SequencedCommand::Insert { id, updates });
                         }
                     }
@@ -2601,9 +2551,6 @@ impl Coordinator {
 
         if !sources_to_drop.is_empty() {
             for &id in &sources_to_drop {
-                if let Some(tables) = &mut self.persisted_tables {
-                    tables.destroy(id);
-                }
                 self.update_timestamper(id, false).await;
                 if let Some(cache_tx) = &mut self.cache_tx {
                     cache_tx
@@ -2900,7 +2847,7 @@ pub async fn serve(
         data_directory,
         timestamp_frequency,
         cache: cache_config,
-        persistence: persistence_config,
+        persistence: _persistence_config,
         logical_compaction_window,
         experimental_mode,
         safe_mode,
@@ -2922,11 +2869,11 @@ pub async fn serve(
         None
     };
 
-    let persisted_tables = if let Some(persistence_config) = &persistence_config {
-        PersistentTables::new(persistence_config)
-    } else {
-        None
-    };
+    // let persisted_tables = if let Some(persistence_config) = &persistence_config {
+    //     PersistentTables::new(persistence_config)
+    // } else {
+    //     None
+    // };
     let (internal_cmd_tx, internal_cmd_rx) = mpsc::unbounded_channel();
 
     let symbiosis = if let Some(symbiosis_url) = symbiosis_url {
@@ -3024,7 +2971,6 @@ pub async fn serve(
             need_advance: true,
             transient_id_counter: 1,
             active_conns: HashMap::new(),
-            persisted_tables,
         };
         coord.broadcast(SequencedCommand::EnableFeedback(feedback_tx));
         if let Some(config) = &logging {

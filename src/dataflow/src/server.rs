@@ -20,8 +20,6 @@ use differential_dataflow::Collection;
 use serde::{Deserialize, Serialize};
 use timely::communication::initialize::WorkerGuards;
 use timely::communication::Allocate;
-use timely::dataflow::operators::unordered_input::UnorderedHandle;
-use timely::dataflow::operators::ActivateCapability;
 use timely::logging::Logger;
 use timely::order::PartialOrder;
 use timely::progress::frontier::Antichain;
@@ -36,16 +34,16 @@ use dataflow_types::{
     SourceConnector, TimestampSourceUpdate, Update,
 };
 use expr::{GlobalId, PartitionId, RowSetFinishing};
-use repr::{Diff, Row, RowArena, Timestamp};
+use repr::{Row, RowArena, Timestamp};
 
 use crate::arrangement::manager::{TraceBundle, TraceManager};
-use crate::logging;
 use crate::logging::materialized::MaterializedEvent;
 use crate::operator::CollectionExt;
 use crate::render::{self, RenderState};
 use crate::server::metrics::Metrics;
 use crate::source::cache::WorkerCacheData;
 use crate::source::timestamp::{TimestampBindingRc, TimestampDataUpdate};
+use crate::{logging, table};
 
 mod metrics;
 
@@ -205,7 +203,7 @@ pub fn serve(config: Config) -> Result<WorkerGuards<()>, String> {
                 timely_worker,
                 render_state: RenderState {
                     traces: TraceManager::new(worker_idx),
-                    local_inputs: HashMap::new(),
+                    tables: table::Manager::new(),
                     ts_source_mapping: HashMap::new(),
                     ts_histories: Default::default(),
                     dataflow_tokens: HashMap::new(),
@@ -530,7 +528,7 @@ where
 
             SequencedCommand::DropSources(names) => {
                 for name in names {
-                    self.render_state.local_inputs.remove(&name);
+                    self.render_state.tables.remove(&name);
                 }
             }
             SequencedCommand::DropSinks(ids) => {
@@ -627,26 +625,23 @@ where
             }
 
             SequencedCommand::AdvanceAllLocalInputs { advance_to } => {
-                for (_, local_input) in self.render_state.local_inputs.iter_mut() {
-                    local_input.capability.downgrade(&advance_to);
+                for (_, local_input) in self.render_state.tables.tables.iter_mut() {
+                    local_input.advance(advance_to);
                 }
             }
 
             SequencedCommand::Insert { id, updates } => {
                 if self.timely_worker.index() == 0 {
-                    let input = match self.render_state.local_inputs.get_mut(&id) {
+                    let input = match self.render_state.tables.tables.get_mut(&id) {
                         Some(input) => input,
                         None => panic!("local input {} missing for insert", id),
                     };
-                    let mut session = input.handle.session(input.capability.clone());
-                    for update in updates {
-                        assert!(update.timestamp >= *input.capability.time());
-                        session.give((update.row, update.timestamp, update.diff));
-                    }
+                    input.update(updates);
                 }
             }
 
             SequencedCommand::AllowCompaction(list) => {
+                self.render_state.tables.allow_compaction(&list);
                 for (id, frontier) in list {
                     self.render_state
                         .traces
@@ -831,11 +826,6 @@ where
             }
         }
     }
-}
-
-pub struct LocalInput {
-    pub handle: UnorderedHandle<Timestamp, (Row, Timestamp, Diff)>,
-    pub capability: ActivateCapability<Timestamp>,
 }
 
 /// An in-progress peek, and data to eventually fulfill it.

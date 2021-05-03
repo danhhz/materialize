@@ -123,9 +123,10 @@ use repr::{RelationType, Row, RowArena, Timestamp};
 use crate::arrangement::manager::{TraceBundle, TraceManager};
 use crate::operator::CollectionExt;
 use crate::render::context::{ArrangementFlavor, Context};
-use crate::server::{CacheMessage, LocalInput};
+use crate::server::CacheMessage;
 use crate::source::timestamp::TimestampDataUpdates;
 use crate::source::SourceToken;
+use crate::table;
 
 mod arrange_by;
 mod context;
@@ -143,8 +144,10 @@ mod upsert;
 pub struct RenderState {
     /// The traces available for sharing across dataflows.
     pub traces: TraceManager,
-    /// Handles to local inputs, keyed by ID.
-    pub local_inputs: HashMap<GlobalId, LocalInput>,
+    /// WIP
+    pub tables: table::Manager,
+    // /// Handles to local inputs, keyed by ID.
+    // pub local_inputs: HashMap<GlobalId, Table>,
     /// Handles to external sources, keyed by ID.
     pub ts_source_mapping: HashMap<GlobalId, Vec<Weak<Option<SourceToken>>>>,
     /// Timestamp data updates for each source.
