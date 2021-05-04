@@ -380,6 +380,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b700ce4376041dcd0a327fd0097c41095743c4c8af8887265942faf1100bd040"
 
 [[package]]
+name = "capnp"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed9ccceaeeb86670017acc4ee196ebecf4c2e322e7e5c13d4aca0b205ef7d14f"
+
+[[package]]
+name = "capnpc"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50c8a9d317b4818641686784227e08ee161d0dbd0c2a06f0355f107df263f549"
+dependencies = [
+ "capnp",
+]
+
+[[package]]
 name = "cast"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -540,7 +555,7 @@ dependencies = [
  "dataflow",
  "dataflow-types",
  "derivative",
- "differential-dataflow",
+ "differential-dataflow 0.12.0 (git+https://github.com/TimelyDataflow/differential-dataflow.git)",
  "expr",
  "futures",
  "interchange",
@@ -549,6 +564,7 @@ dependencies = [
  "log",
  "mz-avro",
  "ore",
+ "persist",
  "pgrepr",
  "postgres-types",
  "prometheus",
@@ -797,7 +813,7 @@ dependencies = [
  "crossbeam-channel",
  "csv-core",
  "dataflow-types",
- "differential-dataflow",
+ "differential-dataflow 0.12.0 (git+https://github.com/TimelyDataflow/differential-dataflow.git)",
  "dogsdogsdogs",
  "expr",
  "flate2",
@@ -812,6 +828,7 @@ dependencies = [
  "mz-avro",
  "ore",
  "pdqselect",
+ "persist",
  "postgres-protocol",
  "postgres-util",
  "prometheus",
@@ -956,6 +973,18 @@ checksum = "524cbf6897b527295dff137cec09ecf3a05f4fddffd7dfcd1585403449e74198"
 [[package]]
 name = "differential-dataflow"
 version = "0.12.0"
+dependencies = [
+ "abomonation",
+ "abomonation_derive",
+ "fnv",
+ "serde",
+ "serde_derive",
+ "timely",
+]
+
+[[package]]
+name = "differential-dataflow"
+version = "0.12.0"
 source = "git+https://github.com/TimelyDataflow/differential-dataflow.git#adf4ac7760b6795962eee2364967ec2bd0c2b3e4"
 dependencies = [
  "abomonation",
@@ -1015,7 +1044,7 @@ source = "git+https://github.com/TimelyDataflow/differential-dataflow.git#adf4ac
 dependencies = [
  "abomonation",
  "abomonation_derive",
- "differential-dataflow",
+ "differential-dataflow 0.12.0 (git+https://github.com/TimelyDataflow/differential-dataflow.git)",
  "serde",
  "serde_derive",
  "timely",
@@ -1868,7 +1897,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dec",
- "differential-dataflow",
+ "differential-dataflow 0.12.0 (git+https://github.com/TimelyDataflow/differential-dataflow.git)",
  "futures",
  "hex",
  "itertools",
@@ -2142,7 +2171,7 @@ dependencies = [
  "datadriven",
  "dataflow",
  "dataflow-types",
- "differential-dataflow",
+ "differential-dataflow 0.12.0 (git+https://github.com/TimelyDataflow/differential-dataflow.git)",
  "fallible-iterator",
  "flate2",
  "futures",
@@ -2865,6 +2894,18 @@ dependencies = [
  "test-util",
  "tokio",
  "tokio-postgres",
+]
+
+[[package]]
+name = "persist"
+version = "0.1.0"
+dependencies = [
+ "abomonation",
+ "abomonation_derive",
+ "capnp",
+ "capnpc",
+ "differential-dataflow 0.12.0",
+ "timely",
 ]
 
 [[package]]

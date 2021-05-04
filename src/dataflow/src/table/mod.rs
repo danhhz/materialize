@@ -12,17 +12,15 @@
 // WIP
 #![allow(unused_variables, dead_code)]
 
-use std::collections::HashMap;
-
 use differential_dataflow::Collection;
+use persist::{PersistableStream, PersistedV1};
 use timely::dataflow::operators::unordered_input::{UnorderedHandle, UnorderedInput};
-use timely::dataflow::operators::ActivateCapability;
+use timely::dataflow::operators::{ActivateCapability, Map};
 use timely::dataflow::{Scope, Stream};
 use timely::progress::Antichain;
 
 use crate::operator::CollectionExt;
 use dataflow_types::{DataflowError, Update};
-use expr::GlobalId;
 use repr::{Diff, Row, Timestamp};
 
 // WIP
@@ -30,21 +28,16 @@ use repr::{Diff, Row, Timestamp};
 //   coordinator instead of the server. I assume because it's more okay to block
 //   there? Investigate
 
-pub enum Durability {
-    Ephemeral,
-    Durable,
-}
-
 pub struct Table {
-    durability: Durability,
+    // persistence: Option<Box<dyn PersistedV1>>,
     handle: UnorderedHandle<Timestamp, (Row, Timestamp, Diff)>,
     capability: ActivateCapability<Timestamp>,
 }
 
 impl Table {
-    fn new<G>(
+    pub fn new<G>(
         scope: &mut G,
-        durability: Durability,
+        persistence: Option<Box<dyn PersistedV1>>,
     ) -> (
         Self,
         (
@@ -55,11 +48,35 @@ impl Table {
     where
         G: Scope<Timestamp = Timestamp>,
     {
+        // TODO: It seems like (when a persister is given) this pattern is now
+        // buffering twice since new_unordered_input is (I think) buffering
+        // input, but so is the persister.
         let ((handle, capability), stream) = scope.new_unordered_input();
         let err_collection = Collection::empty(scope);
 
+        // WIP merge persistence errors into err_collection once this returns
+        // errors
+        let stream = if let Some(persistence) = persistence {
+            let persistence: Box<dyn PersistedV1> = persistence;
+            stream
+                // TODO: Get rid of these 2 maps
+                .map(|(row, ts, diff): (Row, Timestamp, Diff)| {
+                    (row.data().to_vec(), ts as u64, diff as i64)
+                })
+                .persist_unary_sync(persistence)
+                .map(|(row, ts, diff): (Vec<u8>, u64, i64)| {
+                    (
+                        unsafe { Row::from_bytes_unchecked(row) },
+                        ts as Timestamp,
+                        diff as Diff,
+                    )
+                })
+        } else {
+            stream
+        };
+
         let table = Table {
-            durability,
+            // persistence,
             handle,
             capability,
         };
@@ -77,46 +94,12 @@ impl Table {
             session.give((update.row, update.timestamp, update.diff));
         }
     }
-}
 
-pub struct Manager {
-    pub tables: HashMap<GlobalId, Table>,
-}
-
-impl Manager {
-    pub fn new() -> Self {
-        Manager {
-            tables: HashMap::new(),
-        }
-    }
-
-    pub fn new_table<G>(
-        &mut self,
-        scope: &mut G,
-        id: GlobalId,
-        durability: Durability,
-    ) -> (
-        Stream<G, (Row, Timestamp, Diff)>,
-        Collection<G, DataflowError, Diff>,
-    )
-    where
-        G: Scope<Timestamp = Timestamp>,
-    {
-        let (table, (stream, err_collection)) = Table::new(scope, durability);
-        self.tables.insert(id, table);
-        (stream, err_collection)
-    }
-
-    pub fn allow_compaction(&mut self, since: &[(GlobalId, Antichain<Timestamp>)]) {
-        // WIP
-    }
-
-    pub fn remove(&mut self, id: &GlobalId) {
-        self.tables.remove(id);
-    }
-
-    pub fn destroy(&mut self, id: &GlobalId) {
-        // WIP
+    pub fn allow_compaction(&mut self, frontier: &Antichain<Timestamp>) {
+        // if let Some(persistence) = &mut self.persistence {
+        //     // WIP
+        //     persistence.allow_compaction(frontier.elements()[0]);
+        // }
     }
 }
 

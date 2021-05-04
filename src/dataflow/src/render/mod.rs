@@ -107,6 +107,7 @@ use std::rc::Rc;
 use std::rc::Weak;
 
 use differential_dataflow::AsCollection;
+use persist::SQLitePersistManager;
 use timely::communication::Allocate;
 use timely::dataflow::operators::to_stream::ToStream;
 use timely::dataflow::scopes::Child;
@@ -126,7 +127,7 @@ use crate::render::context::{ArrangementFlavor, Context};
 use crate::server::CacheMessage;
 use crate::source::timestamp::TimestampDataUpdates;
 use crate::source::SourceToken;
-use crate::table;
+use crate::table::Table;
 
 mod arrange_by;
 mod context;
@@ -145,7 +146,9 @@ pub struct RenderState {
     /// The traces available for sharing across dataflows.
     pub traces: TraceManager,
     /// WIP
-    pub tables: table::Manager,
+    pub persist: SQLitePersistManager,
+    /// WIP
+    pub tables: HashMap<GlobalId, Table>,
     // /// Handles to local inputs, keyed by ID.
     // pub local_inputs: HashMap<GlobalId, Table>,
     /// Handles to external sources, keyed by ID.
@@ -798,5 +801,17 @@ pub mod datum_vec {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.inner
         }
+    }
+}
+
+pub fn persist_id(id: &GlobalId) -> Option<u64> {
+    match id {
+        GlobalId::User(id) => Some(*id),
+        // System tables repopulate themselves on restart.
+        GlobalId::System(_) => None,
+        // Transisent tables are dropped at the end of a session.
+        GlobalId::Transient(_) => None,
+        // WIP dunno what this is
+        GlobalId::Explain => None,
     }
 }

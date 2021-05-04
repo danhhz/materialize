@@ -32,6 +32,7 @@ use differential_dataflow::lattice::Lattice;
 use futures::future::{self, FutureExt, TryFutureExt};
 use futures::stream::{self, StreamExt};
 use itertools::Itertools;
+use persist::PersistManager;
 use rand::Rng;
 use timely::communication::WorkerGuards;
 use timely::progress::{Antichain, ChangeBatch, Timestamp as _};
@@ -2874,6 +2875,7 @@ pub async fn serve(
     // } else {
     //     None
     // };
+    let persist_manager = PersistManager::new();
     let (internal_cmd_tx, internal_cmd_rx) = mpsc::unbounded_channel();
 
     let symbiosis = if let Some(symbiosis_url) = symbiosis_url {
@@ -2902,6 +2904,7 @@ pub async fn serve(
     let worker_guards = dataflow::serve(dataflow::Config {
         command_receivers: worker_rxs,
         timely_worker,
+        persist: persist_manager,
     })
     .map_err(|s| CoordError::Unstructured(anyhow!("{}", s)))?;
 

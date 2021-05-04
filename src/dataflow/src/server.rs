@@ -17,6 +17,7 @@ use differential_dataflow::operators::arrange::arrangement::Arrange;
 use differential_dataflow::trace::cursor::Cursor;
 use differential_dataflow::trace::TraceReader;
 use differential_dataflow::Collection;
+use persist::SQLitePersistManager;
 use serde::{Deserialize, Serialize};
 use timely::communication::initialize::WorkerGuards;
 use timely::communication::Allocate;
@@ -37,13 +38,13 @@ use expr::{GlobalId, PartitionId, RowSetFinishing};
 use repr::{Row, RowArena, Timestamp};
 
 use crate::arrangement::manager::{TraceBundle, TraceManager};
+use crate::logging;
 use crate::logging::materialized::MaterializedEvent;
 use crate::operator::CollectionExt;
 use crate::render::{self, RenderState};
 use crate::server::metrics::Metrics;
 use crate::source::cache::WorkerCacheData;
 use crate::source::timestamp::{TimestampBindingRc, TimestampDataUpdate};
-use crate::{logging, table};
 
 mod metrics;
 
@@ -171,6 +172,11 @@ pub struct Config {
     pub command_receivers: Vec<crossbeam_channel::Receiver<SequencedCommand>>,
     /// The Timely worker configuration.
     pub timely_worker: timely::WorkerConfig,
+
+    // WIP seems pretty intentional that nothing was threaded down. what can we
+    // do instead?
+    /// WIP
+    pub persist: SQLitePersistManager,
 }
 
 /// Initiates a timely dataflow computation, processing materialized commands.
@@ -186,6 +192,8 @@ pub fn serve(config: Config) -> Result<WorkerGuards<()>, String> {
     // is hard to read through.
     let command_rxs: Mutex<Vec<_>> =
         Mutex::new(config.command_receivers.into_iter().map(Some).collect());
+
+    let persist = config.persist.clone();
 
     let tokio_executor = tokio::runtime::Handle::current();
     timely::execute::execute(
@@ -203,7 +211,8 @@ pub fn serve(config: Config) -> Result<WorkerGuards<()>, String> {
                 timely_worker,
                 render_state: RenderState {
                     traces: TraceManager::new(worker_idx),
-                    tables: table::Manager::new(),
+                    persist: persist.clone(),
+                    tables: HashMap::new(),
                     ts_source_mapping: HashMap::new(),
                     ts_histories: Default::default(),
                     dataflow_tokens: HashMap::new(),
@@ -528,6 +537,9 @@ where
 
             SequencedCommand::DropSources(names) => {
                 for name in names {
+                    if let Some(persist_id) = render::persist_id(&name) {
+                        self.render_state.persist.destroy(persist_id);
+                    }
                     self.render_state.tables.remove(&name);
                 }
             }
@@ -625,24 +637,26 @@ where
             }
 
             SequencedCommand::AdvanceAllLocalInputs { advance_to } => {
-                for (_, local_input) in self.render_state.tables.tables.iter_mut() {
+                for (_, local_input) in self.render_state.tables.iter_mut() {
                     local_input.advance(advance_to);
                 }
             }
 
             SequencedCommand::Insert { id, updates } => {
                 if self.timely_worker.index() == 0 {
-                    let input = match self.render_state.tables.tables.get_mut(&id) {
-                        Some(input) => input,
-                        None => panic!("local input {} missing for insert", id),
+                    let table = match self.render_state.tables.get_mut(&id) {
+                        Some(table) => table,
+                        None => panic!("table {} missing for insert", id),
                     };
-                    input.update(updates);
+                    table.update(updates);
                 }
             }
 
             SequencedCommand::AllowCompaction(list) => {
-                self.render_state.tables.allow_compaction(&list);
                 for (id, frontier) in list {
+                    if let Some(table) = self.render_state.tables.get_mut(&id) {
+                        table.allow_compaction(&frontier);
+                    }
                     self.render_state
                         .traces
                         .allow_compaction(id, frontier.borrow());

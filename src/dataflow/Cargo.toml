@@ -31,6 +31,7 @@ log = "0.4.13"
 mz-avro = { path = "../avro", features = ["snappy"] }
 ore = { path = "../ore" }
 pdqselect = "0.1.0"
+persist = { path = "../../../differential-dataflow/persist" }
 postgres-protocol = { git = "https://github.com/MaterializeInc/rust-postgres" }
 postgres-util = { path = "../postgres-util" }
 prometheus = { git = "https://github.com/MaterializeInc/rust-prometheus.git", default-features = false }
