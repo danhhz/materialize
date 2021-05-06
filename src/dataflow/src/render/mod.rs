@@ -803,15 +803,3 @@ pub mod datum_vec {
         }
     }
 }
-
-pub fn persist_id(id: &GlobalId) -> Option<u64> {
-    match id {
-        GlobalId::User(id) => Some(*id),
-        // System tables repopulate themselves on restart.
-        GlobalId::System(_) => None,
-        // Transisent tables are dropped at the end of a session.
-        GlobalId::Transient(_) => None,
-        // WIP dunno what this is
-        GlobalId::Explain => None,
-    }
-}

@@ -1,4 +1,5 @@
 [workspace]
+exclude = [ "prototype" ]
 members = [
     "demo/billing",
     "demo/debezium/loadgen",

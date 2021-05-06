@@ -15,7 +15,6 @@ use differential_dataflow::hashable::Hashable;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::{collection, AsCollection, Collection};
 use log::warn;
-use persist::PersistedV1;
 use timely::dataflow::operators::Map;
 use timely::dataflow::scopes::Child;
 use timely::dataflow::Scope;
@@ -79,15 +78,8 @@ where
         // This has a lot of potential for improvement in the near future.
         match src.connector.clone() {
             SourceConnector::Local => {
-                let persistence = match super::persist_id(&src_id) {
-                    Some(id) => Some(
-                        Box::new(render_state.persist.create_or_load(id).expect("WIP"))
-                            as Box<dyn PersistedV1>,
-                    ),
-                    None => None,
-                };
-
-                let (table, (stream, err_collection)) = Table::new(scope, persistence);
+                let (table, (stream, err_collection)) =
+                    Table::new(scope, src_id, &mut render_state.persist).expect("WIP");
                 render_state.tables.insert(src_id, table);
                 self.collections.insert(
                     MirRelationExpr::global_get(src_id, src.bare_desc.typ().clone()),

@@ -537,8 +537,10 @@ where
 
             SequencedCommand::DropSources(names) => {
                 for name in names {
-                    if let Some(persist_id) = render::persist_id(&name) {
-                        self.render_state.persist.destroy(persist_id);
+                    if let Some(table) = self.render_state.tables.get_mut(&name) {
+                        if let Some(persistence) = &mut table.persistence {
+                            persistence.0.destroy().expect("WIP");
+                        }
                     }
                     self.render_state.tables.remove(&name);
                 }

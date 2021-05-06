@@ -12,8 +12,11 @@
 // WIP
 #![allow(unused_variables, dead_code)]
 
+use std::error::Error;
+
 use differential_dataflow::Collection;
-use persist::{PersistableStream, PersistedV1};
+use expr::GlobalId;
+use persist::{PersistUnarySync, PersistableMeta, SQLitePersistManager};
 use timely::dataflow::operators::unordered_input::{UnorderedHandle, UnorderedInput};
 use timely::dataflow::operators::{ActivateCapability, Map};
 use timely::dataflow::{Scope, Stream};
@@ -29,7 +32,7 @@ use repr::{Diff, Row, Timestamp};
 //   there? Investigate
 
 pub struct Table {
-    // persistence: Option<Box<dyn PersistedV1>>,
+    pub persistence: Option<PersistableMeta>,
     handle: UnorderedHandle<Timestamp, (Row, Timestamp, Diff)>,
     capability: ActivateCapability<Timestamp>,
 }
@@ -37,14 +40,18 @@ pub struct Table {
 impl Table {
     pub fn new<G>(
         scope: &mut G,
-        persistence: Option<Box<dyn PersistedV1>>,
-    ) -> (
-        Self,
+        id: GlobalId,
+        persistence: &mut SQLitePersistManager,
+    ) -> Result<
         (
-            Stream<G, (Row, Timestamp, Diff)>,
-            Collection<G, DataflowError, Diff>,
+            Self,
+            (
+                Stream<G, (Row, Timestamp, Diff)>,
+                Collection<G, DataflowError, Diff>,
+            ),
         ),
-    )
+        Box<dyn Error>,
+    >
     where
         G: Scope<Timestamp = Timestamp>,
     {
@@ -54,33 +61,44 @@ impl Table {
         let ((handle, capability), stream) = scope.new_unordered_input();
         let err_collection = Collection::empty(scope);
 
+        let persist_id = match id {
+            GlobalId::User(id) => Some(id),
+            // System tables repopulate themselves on restart.
+            GlobalId::System(_) => None,
+            // Transisent tables are dropped at the end of a session.
+            GlobalId::Transient(_) => None,
+            // WIP dunno what this is
+            GlobalId::Explain => None,
+        };
+
         // WIP merge persistence errors into err_collection once this returns
         // errors
-        let stream = if let Some(persistence) = persistence {
-            let persistence: Box<dyn PersistedV1> = persistence;
-            stream
+        let (stream, persistence) = if let Some(persist_id) = persist_id {
+            let (s, m) = persistence.create_or_load(persist_id)?;
+            let stream = stream
                 // TODO: Get rid of these 2 maps
                 .map(|(row, ts, diff): (Row, Timestamp, Diff)| {
                     (row.data().to_vec(), ts as u64, diff as i64)
                 })
-                .persist_unary_sync(persistence)
+                .persist_unary_sync(s)
                 .map(|(row, ts, diff): (Vec<u8>, u64, i64)| {
                     (
                         unsafe { Row::from_bytes_unchecked(row) },
                         ts as Timestamp,
                         diff as Diff,
                     )
-                })
+                });
+            (stream, Some(m))
         } else {
-            stream
+            (stream, None)
         };
 
         let table = Table {
-            // persistence,
+            persistence,
             handle,
             capability,
         };
-        (table, (stream, err_collection))
+        Ok((table, (stream, err_collection)))
     }
 
     pub fn advance(&mut self, ts: Timestamp) {
@@ -96,10 +114,9 @@ impl Table {
     }
 
     pub fn allow_compaction(&mut self, frontier: &Antichain<Timestamp>) {
-        // if let Some(persistence) = &mut self.persistence {
-        //     // WIP
-        //     persistence.allow_compaction(frontier.elements()[0]);
-        // }
+        if let Some(persistence) = &mut self.persistence {
+            persistence.0.allow_compaction(frontier.elements()[0]);
+        }
     }
 }
 
