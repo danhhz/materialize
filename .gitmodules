@@ -1,3 +1,6 @@
 [submodule "sqllogictest"]
 	path = test/sqllogictest/sqlite
 	url = https://github.com/MaterializeInc/sqllogictest.git
+[submodule "prototype/differential-dataflow"]
+	path = prototype/differential-dataflow
+	url = https://github.com/TimelyDataflow/differential-dataflow
