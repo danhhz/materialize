@@ -153,6 +153,11 @@ pub enum ExecuteResponse {
     TransactionExited {
         was_implicit: bool,
         tag: &'static str,
+        /// If Some, a channel containing the results of durably storing the
+        /// transaction's writes to permanent storage. This channel should be
+        /// drained until sender hangup before returning success to the user and
+        /// an error returned if any of the received responses are Errs.
+        rx: Option<mpsc::UnboundedReceiver<Result<(), String>>>,
     },
     // The requested object was altered.
     AlteredObject(ObjectType),

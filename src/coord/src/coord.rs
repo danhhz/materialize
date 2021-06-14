@@ -63,7 +63,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use build_info::BuildInfo;
 use dataflow::{
-    CacheMessage, SequencedCommand, TimestampBindingFeedback, WorkerFeedback,
+    CacheMessage, PersistConfig, SequencedCommand, TimestampBindingFeedback, WorkerFeedback,
     WorkerFeedbackWithMeta,
 };
 use dataflow_types::logging::LoggingConfig as DataflowLoggingConfig;
@@ -186,6 +186,7 @@ pub struct Config<'a> {
     pub experimental_mode: bool,
     pub safe_mode: bool,
     pub build_info: &'static BuildInfo,
+    pub persist: PersistConfig,
 }
 
 /// Glues the external world to the Timely workers.
@@ -2108,7 +2109,7 @@ impl Coordinator {
         // call `maintenance` here because it will soon be called after the next
         // `update_upper`.
 
-        if let EndTransactionAction::Commit = action {
+        let rx = if let EndTransactionAction::Commit = action {
             if let Some(ops) = txn.into_ops() {
                 match ops {
                     TransactionOps::Writes(inserts) => {
@@ -2116,6 +2117,7 @@ impl Coordinator {
                         // coordinator timestamp here to provide linearizability. The wall_time does
                         // not have to relate to the write time.
                         let timestamp = self.get_write_ts();
+                        let (tx, rx) = mpsc::unbounded_channel();
                         for WriteOp { id, rows } in inserts {
                             // Re-verify this id exists.
                             if self.catalog.try_get_by_id(id).is_none() {
@@ -2133,17 +2135,27 @@ impl Coordinator {
                                 })
                                 .collect();
 
-                            self.broadcast(SequencedCommand::Insert { id, updates });
+                            self.broadcast(SequencedCommand::Insert {
+                                id,
+                                updates,
+                                tx: Some(tx.clone()),
+                            });
                         }
+                        Some(rx)
                     }
-                    _ => {}
+                    _ => None,
                 }
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         Ok(ExecuteResponse::TransactionExited {
             tag: action.tag(),
             was_implicit,
+            rx,
         })
     }
 
@@ -2946,6 +2958,9 @@ impl Coordinator {
                         timestamp,
                     })
                     .collect(),
+                // Persistence of system table inserts is best effort, so throw
+                // away the response.
+                tx: None,
             })
         }
     }
@@ -3284,6 +3299,7 @@ pub async fn serve(
         experimental_mode,
         safe_mode,
         build_info,
+        persist,
     }: Config<'_>,
 ) -> Result<(Handle, Client), CoordError> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -3328,6 +3344,7 @@ pub async fn serve(
         timely_worker,
         experimental_mode,
         now: system_time,
+        persist,
     })
     .map_err(|s| CoordError::Unstructured(anyhow!("{}", s)))?;
 

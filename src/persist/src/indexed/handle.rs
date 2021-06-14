@@ -14,7 +14,7 @@ use std::sync::mpsc;
 
 use crate::error::Error;
 use crate::indexed::encoding::Id;
-use crate::indexed::runtime::RuntimeClient;
+use crate::indexed::runtime::{CmdResponse, RuntimeClient};
 use crate::indexed::IndexedSnapshot;
 
 /// A handle that allows writes of ((Key, Value), Time, Diff) updates into an
@@ -31,20 +31,14 @@ impl StreamWriteHandle {
     }
 
     /// Synchronously writes (Key, Value, Time, Diff) updates.
-    pub fn write_sync(&mut self, updates: &[((String, String), u64, isize)]) -> Result<(), Error> {
-        // TODO: Make Write::write_sync signature non-blocking.
-        let (rx, tx) = mpsc::channel();
-        self.runtime.write(self.id, updates, rx.into());
-        tx.recv().map_err(|_| Error::RuntimeShutdown)?
+    pub fn write_sync(&mut self, updates: &[((String, String), u64, isize)], res: CmdResponse<()>) {
+        self.runtime.write(self.id, updates, res);
     }
 
     /// Closes the stream at the given timestamp, migrating data strictly less
     /// than it into the trace.
-    pub fn seal(&mut self, upper: u64) -> Result<(), Error> {
-        // TODO: Make Write::write_sync signature non-blocking.
-        let (rx, tx) = mpsc::channel();
-        self.runtime.seal(self.id, upper, rx.into());
-        tx.recv().map_err(|_| Error::RuntimeShutdown)?
+    pub fn seal(&mut self, upper: u64, res: CmdResponse<()>) {
+        self.runtime.seal(self.id, upper, res);
     }
 }
 

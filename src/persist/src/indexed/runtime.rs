@@ -88,7 +88,7 @@ impl<T> From<Box<dyn FnOnce(Result<T, Error>) + Send + 'static>> for CmdResponse
 }
 
 impl<T> CmdResponse<T> {
-    fn send(self, t: Result<T, Error>) {
+    pub(crate) fn send(self, t: Result<T, Error>) {
         match self {
             CmdResponse::Ignore => {}
             CmdResponse::Callback(c) => c(t),

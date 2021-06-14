@@ -38,16 +38,18 @@ use dataflow_types::{
 };
 use expr::{GlobalId, PartitionId, RowSetFinishing};
 use ore::now::NowFn;
+use persist::error::Error as PersistError;
+use persist::operators::input::PersistentUnorderedHandle;
 use repr::{Diff, Row, RowArena, Timestamp};
 
 use crate::arrangement::manager::{TraceBundle, TraceManager};
-use crate::logging;
 use crate::logging::materialized::MaterializedEvent;
 use crate::operator::CollectionExt;
 use crate::render::{self, RenderState};
 use crate::server::metrics::Metrics;
 use crate::source::cache::WorkerCacheData;
 use crate::source::timestamp::TimestampBindingRc;
+use crate::{logging, persistcfg, PersistConfig};
 
 mod metrics;
 
@@ -100,6 +102,17 @@ pub enum SequencedCommand {
         id: GlobalId,
         /// A list of updates to be introduced to the input.
         updates: Vec<Update>,
+        /// If Some, a channel containing the results of durably storing the
+        /// transaction's writes to permanent storage. The receiver side of this
+        /// channel should be drained until sender hangup before returning
+        /// success to the user and an error returned if any of the received
+        /// responses are Errs.
+        ///
+        /// The receiver side of this is allowed to hang up (e.g. if the pgconn
+        /// that executed the INSERT is severed before the write finishes
+        /// persisting) and errors resulting from that are ignored by the
+        /// sender.
+        tx: Option<mpsc::UnboundedSender<Result<(), String>>>,
     },
     /// Enable compaction in views.
     ///
@@ -203,6 +216,8 @@ pub struct Config {
     pub experimental_mode: bool,
     /// Function to get wall time now.
     pub now: NowFn,
+    /// Configuration of the persistence runtime and features.
+    pub persist: PersistConfig,
 }
 
 /// Initiates a timely dataflow computation, processing materialized commands.
@@ -222,6 +237,7 @@ pub fn serve(config: Config) -> Result<WorkerGuards<()>, String> {
 
     let tokio_executor = tokio::runtime::Handle::current();
     let now = config.now;
+    let persist = config.persist.init()?;
     timely::execute::execute(
         timely::Config {
             communication: timely::CommunicationConfig::Process(workers),
@@ -243,6 +259,7 @@ pub fn serve(config: Config) -> Result<WorkerGuards<()>, String> {
                     dataflow_tokens: HashMap::new(),
                     caching_tx: None,
                     sink_write_frontiers: HashMap::new(),
+                    persist: persist.clone(),
                 },
                 materialized_logger: None,
                 command_rx,
@@ -787,17 +804,19 @@ where
                 }
             }
 
-            SequencedCommand::Insert { id, updates } => {
+            SequencedCommand::Insert { id, updates, tx } => {
                 if self.timely_worker.index() == 0 {
                     let input = match self.render_state.local_inputs.get_mut(&id) {
                         Some(input) => input,
                         None => panic!("local input {} missing for insert", id),
                     };
-                    let mut session = input.handle.session(input.capability.clone());
-                    for update in updates {
-                        assert!(update.timestamp >= *input.capability.time());
-                        session.give((update.row, update.timestamp, update.diff));
-                    }
+                    input.give_updates(updates, move |res| {
+                        if let Some(tx) = &tx {
+                            // As explained in the docs for Insert::tx, errors
+                            // sending here are ignored.
+                            let _ = tx.send(res);
+                        }
+                    });
                 }
             }
 
@@ -1011,9 +1030,47 @@ where
     }
 }
 
+pub enum LocalInputHandle {
+    Transient(UnorderedHandle<Timestamp, (Row, Timestamp, Diff)>),
+    Persistent(PersistentUnorderedHandle),
+}
+
 pub struct LocalInput {
-    pub handle: UnorderedHandle<Timestamp, (Row, Timestamp, Diff)>,
+    pub handle: LocalInputHandle,
     pub capability: ActivateCapability<Timestamp>,
+}
+
+impl LocalInput {
+    fn give_updates<F: Fn(Result<(), String>) + Clone + Send + 'static>(
+        &mut self,
+        updates: Vec<Update>,
+        callback: F,
+    ) {
+        match &mut self.handle {
+            LocalInputHandle::Transient(handle) => {
+                let mut session = handle.session(self.capability.clone());
+                for update in updates {
+                    assert!(update.timestamp >= *self.capability.time());
+                    session.give((update.row, update.timestamp, update.diff));
+                    callback(Ok(()));
+                }
+            }
+            LocalInputHandle::Persistent(handle) => {
+                let mut session = handle.session(self.capability.clone());
+                for update in updates {
+                    assert!(update.timestamp >= *self.capability.time());
+                    let row = persistcfg::row_to_string(update.row);
+                    let callback = callback.clone();
+                    let callback: Box<dyn FnOnce(Result<(), PersistError>) + Send + 'static> =
+                        Box::new(move |res: Result<(), PersistError>| {
+                            let res = res.map(|_| ()).map_err(|err| err.to_string());
+                            callback(res)
+                        });
+                    session.give((row, update.timestamp, update.diff), callback.into());
+                }
+            }
+        }
+    }
 }
 
 /// An in-progress peek, and data to eventually fulfill it.

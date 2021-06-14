@@ -49,6 +49,12 @@ pub mod storage;
 // - Clean up the various ways we pass a (sometimes encoded) entry/update
 //   around, there are many for no particular reason: returning an iterator,
 //   accepting a closure, accepting a mutable Vec, implementing Snapshot, etc.
+// - It's unfortunate that the INSERT path goes through the following. Is there
+//   anything we can do here? I don't see one yet.
+//   - channel (TransactionExited::rx/Insert::tx) to
+//   - closure (handle_command) to
+//   - closure (LocalInput::give_updates) to
+//   - channel (PersistentUnorderedSession::give)
 // - Meta TODO: These were my immediate thoughts but there's stuff I'm
 //   forgetting. Flesh this list out.
 

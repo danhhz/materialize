@@ -9,6 +9,8 @@
 
 //! A Timely Dataflow operator that synchronously persists stream input.
 
+use std::sync::mpsc;
+
 use timely::dataflow::channels::pushers::buffer::AutoflushSession;
 use timely::dataflow::channels::pushers::{Counter, Tee};
 use timely::dataflow::operators::unordered_input::UnorderedHandle;
@@ -16,7 +18,9 @@ use timely::dataflow::operators::{ActivateCapability, Concat, ToStream, Unordere
 use timely::dataflow::{Scope, Stream};
 use timely::scheduling::ActivateOnDrop;
 
+use crate::error::Error;
 use crate::indexed::handle::{StreamMetaHandle, StreamWriteHandle};
+use crate::indexed::runtime::CmdResponse;
 use crate::persister::Snapshot;
 use crate::Token;
 
@@ -100,16 +104,26 @@ pub struct PersistentUnorderedSession<'b> {
 
 impl<'b> PersistentUnorderedSession<'b> {
     /// Transmits a single record after synchronously persisting it.
-    pub fn give(&mut self, data: (String, u64, isize)) {
-        self.write
-            .write_sync(&[((data.0.clone(), String::new()), data.1, data.2)])
-            .expect("TODO");
-        self.session.give(data);
+    pub fn give(&mut self, data: (String, u64, isize), res: CmdResponse<()>) {
+        let (tx, rx) = mpsc::channel();
+        self.write.write_sync(
+            &[((data.0.clone(), String::new()), data.1, data.2)],
+            tx.into(),
+        );
+        match rx.recv() {
+            Ok(_) => {
+                self.session.give(data);
+                res.send(Ok(()))
+            }
+            Err(_) => res.send(Err(Error::RuntimeShutdown)),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
     use timely::dataflow::operators::capture::Extract;
     use timely::dataflow::operators::Capture;
 
@@ -131,7 +145,9 @@ mod tests {
             });
             let mut session = handle.session(cap);
             for i in 1..=5 {
-                session.give((i.to_string(), i, 1));
+                let (tx, rx) = mpsc::channel();
+                session.give((i.to_string(), i, 1), tx.into());
+                while rx.recv().is_ok() {}
             }
         });
 
@@ -150,7 +166,9 @@ mod tests {
             });
             let mut session = handle.session(cap);
             for i in 6..=9 {
-                session.give((i.to_string(), i, 1));
+                let (tx, rx) = mpsc::channel();
+                session.give((i.to_string(), i, 1), tx.into());
+                while rx.recv().is_ok() {}
             }
             recv
         });

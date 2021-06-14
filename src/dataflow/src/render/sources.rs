@@ -15,9 +15,9 @@ use std::rc::Rc;
 use differential_dataflow::hashable::Hashable;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::{collection, AsCollection, Collection};
-use timely::dataflow::operators::unordered_input::UnorderedInput;
-use timely::dataflow::operators::Map;
+use persist::operators::input::PersistentUnorderedInput;
 use timely::dataflow::operators::OkErr;
+use timely::dataflow::operators::{Map, UnorderedInput};
 use timely::dataflow::scopes::Child;
 use timely::dataflow::Scope;
 
@@ -34,17 +34,17 @@ use crate::decode::render_decode;
 use crate::decode::render_decode_delimited;
 use crate::decode::rewrite_for_upsert;
 use crate::logging::materialized::Logger;
-use crate::metrics;
 use crate::operator::{CollectionExt, StreamExt};
 use crate::render::context::Context;
 use crate::render::{RelevantTokens, RenderState};
-use crate::server::LocalInput;
+use crate::server::{LocalInput, LocalInputHandle};
 use crate::source::DecodeResult;
 use crate::source::SourceConfig;
 use crate::source::{
     self, FileSourceReader, KafkaSourceReader, KinesisSourceReader, PostgresSourceReader,
     PubNubSourceReader, S3SourceReader,
 };
+use crate::{metrics, persistcfg};
 
 impl<'g, G> Context<Child<'g, G, G::Timestamp>, Row, Timestamp>
 where
@@ -88,10 +88,39 @@ where
             // Create a new local input (exposed as TABLEs to users). Data is inserted
             // via SequencedCommand::Insert commands.
             SourceConnector::Local(_) => {
-                let ((handle, capability), stream) = scope.new_unordered_input();
-                render_state
-                    .local_inputs
-                    .insert(src_id, LocalInput { handle, capability });
+                // WIP is src_id or orig_id the right thing to pass in here?
+                let persisted_source = if let Some(persist) = &mut render_state.persist {
+                    if let Some(stream_name) = persist.stream_name(src_id, &src) {
+                        let token = persist
+                            .persister
+                            .create_or_load(&stream_name)
+                            .expect("WIP this could be an error if the persistence runtime has unexpectedly shut down, what do we do with this?");
+                        let ((handle, capability), stream) =
+                            scope.new_persistent_unordered_input(token);
+                        let stream = stream.map(|(row, ts, diff)| {
+                            let row = persistcfg::string_to_row(&row)
+                                .expect("WIP this should be emitted in err_collection");
+                            (row, ts, diff)
+                        });
+                        Some(((LocalInputHandle::Persistent(handle), capability), stream))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let ((handle, capability), stream) = persisted_source.unwrap_or_else(|| {
+                    let ((handle, capability), stream) = scope.new_unordered_input();
+                    ((LocalInputHandle::Transient(handle), capability), stream)
+                });
+
+                render_state.local_inputs.insert(
+                    src_id,
+                    LocalInput {
+                        handle: handle,
+                        capability,
+                    },
+                );
                 let as_of_frontier = self.as_of_frontier.clone();
                 let ok_collection = stream
                     .map_in_place(move |(_, mut time, _)| {

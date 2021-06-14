@@ -15,6 +15,7 @@ mod arrangement;
 mod decode;
 mod metrics;
 mod operator;
+mod persistcfg;
 mod render;
 mod server;
 mod sink;
@@ -22,6 +23,7 @@ mod sink;
 pub mod logging;
 pub mod source;
 
+pub use crate::persistcfg::PersistConfig;
 pub use server::{
     serve, CacheMessage, Config, SequencedCommand, TimestampBindingFeedback, WorkerFeedback,
     WorkerFeedbackWithMeta,
