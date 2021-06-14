@@ -1065,7 +1065,11 @@ where
                 }
                 command_complete!("BEGIN")
             }
-            ExecuteResponse::TransactionExited { tag, was_implicit } => {
+            ExecuteResponse::TransactionExited {
+                tag,
+                was_implicit,
+                rx,
+            } => {
                 // In Postgres, if a user sends a COMMIT or ROLLBACK in an implicit
                 // transaction, a notice is sent warning them. (The transaction is still closed
                 // and a new implicit transaction started, though.)
@@ -1076,6 +1080,22 @@ where
                     );
                     self.conn.send(msg).await?;
                 }
+
+                // Make sure any writes have been persisted as necessary.
+                if let Some(mut rx) = rx {
+                    loop {
+                        match rx.recv().await {
+                            None => break,
+                            Some(Ok(_)) => {}
+                            Some(Err(text)) => {
+                                return self
+                                    .error(ErrorResponse::error(SqlState::INTERNAL_ERROR, text))
+                                    .await;
+                            }
+                        }
+                    }
+                }
+
                 command_complete!("{}", tag)
             }
             ExecuteResponse::Tailing { rx } => {

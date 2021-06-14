@@ -122,6 +122,7 @@ use ore::now::NowFn;
 use repr::{Row, Timestamp};
 
 use crate::arrangement::manager::{TraceBundle, TraceManager};
+use crate::persistcfg::PersisterWithConfig;
 use crate::render::context::CollectionBundle;
 use crate::render::context::{ArrangementFlavor, Context};
 use crate::server::LocalInput;
@@ -154,6 +155,8 @@ pub struct RenderState {
     /// Frontier of sink writes (all subsequent writes will be at times at or
     /// equal to this frontier)
     pub sink_write_frontiers: HashMap<GlobalId, Rc<RefCell<Antichain<Timestamp>>>>,
+    /// Configuration of the persistence runtime and features.
+    pub persist: Option<PersisterWithConfig>,
 }
 
 /// A container for "tokens" that are relevant to an in-construction dataflow.
