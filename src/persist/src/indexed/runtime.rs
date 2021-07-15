@@ -10,7 +10,10 @@
 //! Runtime for concurrent, asynchronous use of [Indexed], and the public API
 //! used by the rest of the crate to connect to it.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{mpsc, Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
 
 use log;
@@ -79,8 +82,8 @@ pub enum CmdResponse<T> {
     /// NB: This isn't guaranteed to get called because of a race with runtime
     /// shutdown.
     Callback(Box<dyn FnOnce(Result<T, Error>) + Send + 'static>),
-    // TODO: Add a std::future::Future variant to better play with async? I
-    // think the Future impl would be pretty straightforward.
+    /// WIP
+    Future(PersistFutureHandle<T>),
 }
 
 impl<T> From<mpsc::Sender<Result<T, Error>>> for CmdResponse<T> {
@@ -110,6 +113,65 @@ impl<T> CmdResponse<T> {
                 }
                 // Defensively drop c, just to make it obvious.
                 drop(c)
+            }
+            CmdResponse::Future(f) => f.fill(t),
+        }
+    }
+}
+
+struct PersistFutureCore<T> {
+    value: Option<Result<T, Error>>,
+    waker: Option<Waker>,
+}
+
+/// WIP
+pub struct PersistFuture<T> {
+    // WIP I think we can use an atomic or a one shot channel instead of a mutex
+    core: Arc<Mutex<PersistFutureCore<T>>>,
+}
+
+pub struct PersistFutureHandle<T> {
+    core: Arc<Mutex<PersistFutureCore<T>>>,
+}
+
+impl<T> PersistFuture<T> {
+    pub fn new() -> (Pin<Box<PersistFuture<T>>>, PersistFutureHandle<T>) {
+        let core = Arc::new(Mutex::new(PersistFutureCore {
+            value: None,
+            waker: None,
+        }));
+        let f = Box::pin(PersistFuture { core: core.clone() });
+        let h = PersistFutureHandle { core };
+        (f, h)
+    }
+}
+
+impl<T> PersistFutureHandle<T> {
+    fn fill(self, t: Result<T, Error>) {
+        let mut core = self.core.lock().expect("WIP");
+        core.value = Some(t);
+        if let Some(waker) = core.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+impl<T> Future for PersistFuture<T> {
+    type Output = Result<T, Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut core = self.core.lock().expect("WIP");
+        match core.value.take() {
+            Some(value) => Poll::Ready(value),
+            None => {
+                // The future docs are explicit that we only have to wake the
+                // last Waker if we get more than one.
+                //
+                // WIP are we supposed to be cloning this on every poll call or
+                // maybe gating that with some sort of check for the same waker
+                // as the last poll call?
+                core.waker = Some(cx.waker().clone());
+                Poll::Pending
             }
         }
     }
@@ -271,8 +333,10 @@ impl<K: Clone, V: Clone> StreamWriteHandle<K, V> {
     }
 
     /// Synchronously writes (Key, Value, Time, Diff) updates.
-    pub fn write(&mut self, updates: &[((K, V), u64, isize)], res: CmdResponse<SeqNo>) {
-        self.runtime.write(self.id, updates, res);
+    pub fn write(&mut self, updates: &[((K, V), u64, isize)]) -> Pin<Box<PersistFuture<SeqNo>>> {
+        let (f, h) = PersistFuture::new();
+        self.runtime.write(self.id, updates, CmdResponse::Future(h));
+        f
     }
 
     /// Closes the stream at the given timestamp, migrating data strictly less
@@ -382,85 +446,91 @@ mod tests {
 
     #[test]
     fn runtime() -> Result<(), Error> {
-        let data = vec![
-            (("key1".to_string(), "val1".to_string()), 1, 1),
-            (("key2".to_string(), "val2".to_string()), 1, 1),
-        ];
+        async_std::task::block_on(async {
+            let data = vec![
+                (("key1".to_string(), "val1".to_string()), 1, 1),
+                (("key2".to_string(), "val2".to_string()), 1, 1),
+            ];
 
-        let buffer = MemBuffer::new("runtime")?;
-        let blob = MemBlob::new("runtime")?;
-        let mut runtime = start(buffer, blob)?;
+            let buffer = MemBuffer::new("runtime")?;
+            let blob = MemBlob::new("runtime")?;
+            let mut runtime = start(buffer, blob)?;
 
-        let (mut write, meta) = runtime.create_or_load("0")?.into_inner();
-        block_on(|res| write.write(&data, res))?;
-        let snap = meta.snapshot()?;
-        assert_eq!(snap.read_to_end(), data);
+            let (mut write, meta) = runtime.create_or_load("0")?.into_inner();
+            write.write(&data).await?;
+            let snap = meta.snapshot()?;
+            assert_eq!(snap.read_to_end(), data);
 
-        // Commands sent after stop return an error, but calling stop again is
-        // fine.
-        runtime.stop()?;
-        assert!(runtime.create_or_load("0").is_err());
-        runtime.stop()?;
+            // Commands sent after stop return an error, but calling stop again is
+            // fine.
+            runtime.stop()?;
+            assert!(runtime.create_or_load("0").is_err());
+            runtime.stop()?;
 
-        Ok(())
+            Ok(())
+        })
     }
 
     #[test]
     fn concurrent() -> Result<(), Error> {
-        let data = vec![
-            (("key1".to_string(), "val1".to_string()), 1, 1),
-            (("key2".to_string(), "val2".to_string()), 1, 1),
-        ];
+        async_std::task::block_on(async {
+            let data = vec![
+                (("key1".to_string(), "val1".to_string()), 1, 1),
+                (("key2".to_string(), "val2".to_string()), 1, 1),
+            ];
 
-        let buffer = MemBuffer::new("concurrent")?;
-        let blob = MemBlob::new("concurrent")?;
-        let client1 = start(buffer, blob)?;
-        let _ = client1.create_or_load("0")?;
+            let buffer = MemBuffer::new("concurrent")?;
+            let blob = MemBlob::new("concurrent")?;
+            let client1 = start(buffer, blob)?;
+            let _ = client1.create_or_load("0")?;
 
-        // Everything is still running after client1 is dropped.
-        let mut client2 = client1.clone();
-        drop(client1);
-        let (mut write, meta) = client2.create_or_load("0")?.into_inner();
-        block_on(|res| write.write(&data, res))?;
-        let snap = meta.snapshot()?;
-        assert_eq!(snap.read_to_end(), data);
-        client2.stop()?;
+            // Everything is still running after client1 is dropped.
+            let mut client2 = client1.clone();
+            drop(client1);
+            let (mut write, meta) = client2.create_or_load("0")?.into_inner();
+            write.write(&data).await?;
+            let snap = meta.snapshot()?;
+            assert_eq!(snap.read_to_end(), data);
+            client2.stop()?;
 
-        Ok(())
+            Ok(())
+        })
     }
 
     #[test]
     fn restart() -> Result<(), Error> {
-        let data = vec![
-            (("key1".to_string(), "val1".to_string()), 1, 1),
-            (("key2".to_string(), "val2".to_string()), 1, 1),
-        ];
+        async_std::task::block_on(async {
+            let data = vec![
+                (("key1".to_string(), "val1".to_string()), 1, 1),
+                (("key2".to_string(), "val2".to_string()), 1, 1),
+            ];
 
-        let mut registry = MemRegistry::new();
+            let mut registry = MemRegistry::new();
 
-        // Shutdown happens if we explicitly call stop, unlocking the buffer and
-        // blob and allowing them to be reused in the next Indexed.
-        let mut persister = registry.open("path", "restart-1")?;
-        let (mut write, _) = persister.create_or_load("0")?.into_inner();
-        block_on(|res| write.write(&data[0..1], res))?;
-        assert_eq!(persister.stop(), Ok(()));
+            // Shutdown happens if we explicitly call stop, unlocking the buffer and
+            // blob and allowing them to be reused in the next Indexed.
+            let mut persister = registry.open("path", "restart-1")?;
+            let (mut write, _) = persister.create_or_load("0")?.into_inner();
+            write.write(&data[0..1]).await?;
+            assert_eq!(persister.stop(), Ok(()));
 
-        // Shutdown happens if all handles are dropped, even if we don't call
-        // stop.
-        let persister = registry.open("path", "restart-2")?;
-        let (mut write, _) = persister.create_or_load("0")?.into_inner();
-        block_on(|res| write.write(&data[1..2], res))?;
-        drop(write);
-        drop(persister);
+            // Shutdown happens if all handles are dropped, even if we don't call
+            // stop.
+            let persister = registry.open("path", "restart-2")?;
+            let (mut write, _) = persister.create_or_load("0")?.into_inner();
+            write.write(&data[1..2]).await?;
+            drop(write);
+            drop(persister);
 
-        // We can read back what we previously wrote.
-        {
-            let persister = registry.open("path", "restart-1")?;
-            let (_, meta) = persister.create_or_load("0")?.into_inner();
-            let snap = meta.snapshot()?;
-            assert_eq!(snap.read_to_end(), data);
-        }
+            // We can read back what we previously wrote.
+            {
+                let persister = registry.open("path", "restart-1")?;
+                let (_, meta) = persister.create_or_load("0")?.into_inner();
+                let snap = meta.snapshot()?;
+                assert_eq!(snap.read_to_end(), data);
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 }

@@ -18,8 +18,8 @@ use timely::Data;
 use crate::indexed::runtime::StreamReadHandle;
 use crate::indexed::Snapshot;
 
-pub mod input;
-pub mod stream;
+// pub mod input;
+// pub mod stream;
 
 fn replay<G: Scope<Timestamp = u64>, K: Data, V: Data>(
     scope: &mut G,
