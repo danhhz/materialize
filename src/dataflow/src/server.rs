@@ -18,7 +18,6 @@ use differential_dataflow::operators::arrange::arrangement::Arrange;
 use differential_dataflow::trace::cursor::Cursor;
 use differential_dataflow::trace::TraceReader;
 use differential_dataflow::Collection;
-use persist::storage::SeqNo;
 use serde::{Deserialize, Serialize};
 use timely::communication::initialize::WorkerGuards;
 use timely::communication::Allocate;
@@ -38,8 +37,6 @@ use dataflow_types::{
 };
 use expr::{GlobalId, PartitionId, RowSetFinishing};
 use ore::{now::NowFn, result::ResultExt};
-use persist::error::Error as PersistError;
-use persist::operators::input::PersistentUnorderedHandle;
 use repr::{Diff, Row, RowArena, Timestamp};
 
 use crate::arrangement::manager::{TraceBundle, TraceManager};
@@ -48,7 +45,7 @@ use crate::operator::CollectionExt;
 use crate::render::{self, plan::Plan as RenderPlan, RenderState};
 use crate::server::metrics::Metrics;
 use crate::source::timestamp::TimestampBindingRc;
-use crate::{logging, PersistConfig};
+use crate::{logging, PersistConfig, PersisterWithConfig};
 
 mod metrics;
 
@@ -115,17 +112,6 @@ pub enum SequencedCommand {
         id: GlobalId,
         /// A list of updates to be introduced to the input.
         updates: Vec<Update>,
-        /// If Some, a channel containing the results of durably storing the
-        /// transaction's writes to permanent storage. The receiver side of this
-        /// channel should be drained until sender hangup before returning
-        /// success to the user and an error returned if any of the received
-        /// responses are Errs.
-        ///
-        /// The receiver side of this is allowed to hang up (e.g. if the pgconn
-        /// that executed the INSERT is severed before the write finishes
-        /// persisting) and errors resulting from that are ignored by the
-        /// sender.
-        tx: Option<mpsc::UnboundedSender<Result<(), String>>>,
     },
     /// Enable compaction in views.
     ///
@@ -220,7 +206,7 @@ pub struct Config {
 }
 
 /// Initiates a timely dataflow computation, processing materialized commands.
-pub fn serve(config: Config) -> Result<WorkerGuards<()>, String> {
+pub fn serve(config: Config) -> Result<(WorkerGuards<()>, Option<PersisterWithConfig>), String> {
     let experimental_mode = config.experimental_mode;
     let workers = config.command_receivers.len();
     assert!(workers > 0);
@@ -237,7 +223,8 @@ pub fn serve(config: Config) -> Result<WorkerGuards<()>, String> {
     let tokio_executor = tokio::runtime::Handle::current();
     let now = config.now;
     let persist = config.persist.init()?;
-    timely::execute::execute(
+    let persist_ret = persist.clone();
+    let guards = timely::execute::execute(
         timely::Config {
             communication: timely::CommunicationConfig::Process(workers),
             worker: config.timely_worker,
@@ -272,7 +259,8 @@ pub fn serve(config: Config) -> Result<WorkerGuards<()>, String> {
             }
             .run()
         },
-    )
+    )?;
+    Ok((guards, persist_ret))
 }
 
 /// State maintained for each worker thread.
@@ -802,19 +790,13 @@ where
                 }
             }
 
-            SequencedCommand::Insert { id, updates, tx } => {
+            SequencedCommand::Insert { id, updates } => {
                 if self.timely_worker.index() == 0 {
                     let input = match self.render_state.local_inputs.get_mut(&id) {
                         Some(input) => input,
                         None => panic!("local input {} missing for insert", id),
                     };
-                    input.give_updates(updates, move |res| {
-                        if let Some(tx) = &tx {
-                            // As explained in the docs for Insert::tx, errors
-                            // sending here are ignored.
-                            let _ = tx.send(res);
-                        }
-                    });
+                    input.give_updates(updates, move |_res| {});
                 }
             }
 
@@ -1027,7 +1009,6 @@ where
 
 pub enum LocalInputHandle {
     Transient(UnorderedHandle<Timestamp, (Row, Timestamp, Diff)>),
-    Persistent(PersistentUnorderedHandle<Vec<u8>>),
 }
 
 pub struct LocalInput {
@@ -1048,24 +1029,6 @@ impl LocalInput {
                     assert!(update.timestamp >= *self.capability.time());
                     session.give((update.row, update.timestamp, update.diff));
                     callback(Ok(()));
-                }
-            }
-            LocalInputHandle::Persistent(handle) => {
-                let mut session = handle.session(self.capability.clone());
-                for update in updates {
-                    assert!(update.timestamp >= *self.capability.time());
-                    let mut encoded_row = Vec::new();
-                    update.row.encode(&mut encoded_row);
-                    let callback = callback.clone();
-                    let callback: Box<dyn FnOnce(Result<SeqNo, PersistError>) + Send + 'static> =
-                        Box::new(move |res: Result<SeqNo, PersistError>| {
-                            let res = res.map(|_| ()).map_err(|err| err.to_string());
-                            callback(res)
-                        });
-                    session.give(
-                        (encoded_row, update.timestamp, update.diff),
-                        callback.into(),
-                    );
                 }
             }
         }

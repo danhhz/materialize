@@ -11,7 +11,6 @@
 
 use std::path::PathBuf;
 
-use dataflow_types::SourceDesc;
 use expr::GlobalId;
 use persist::file::{FileBlob, FileBuffer};
 use persist::indexed::runtime::{self, RuntimeClient};
@@ -57,19 +56,23 @@ impl PersistConfig {
     }
 }
 
+/// WIP
 #[derive(Clone)]
 pub struct PersisterWithConfig {
+    /// WIP
     pub config: PersistConfig,
+    /// WIP
     pub persister: RuntimeClient<Vec<u8>, ()>,
 }
 
 impl PersisterWithConfig {
-    pub fn stream_name(&self, id: GlobalId, src: &SourceDesc) -> Option<String> {
+    /// WIP
+    pub fn stream_name(&self, id: GlobalId) -> Option<String> {
         match id {
             GlobalId::User(id) if self.config.user_table_enabled => {
                 // TODO: This needs to be written down somewhere in the catalog in case
                 // we need to change the naming at some point.
-                Some(format!("user-table-{:?}-{}", id, src.name))
+                Some(format!("user-table-{:?}", id))
             }
             _ => None,
         }

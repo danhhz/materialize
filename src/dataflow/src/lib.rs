@@ -23,7 +23,7 @@ mod sink;
 pub mod logging;
 pub mod source;
 
-pub use persistcfg::PersistConfig;
+pub use persistcfg::{PersistConfig, PersisterWithConfig};
 pub use render::plan::Plan;
 pub use server::{
     serve, Config, SequencedCommand, TimestampBindingFeedback, WorkerFeedback,

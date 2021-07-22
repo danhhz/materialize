@@ -15,8 +15,9 @@ use std::rc::Rc;
 use differential_dataflow::hashable::Hashable;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::{collection, AsCollection, Collection};
-use persist::operators::input::PersistentUnorderedInput;
-use timely::dataflow::operators::OkErr;
+use persist::operators::replay;
+use timely::dataflow::operators::generic::operator::empty;
+use timely::dataflow::operators::{Concat, OkErr, ToStream};
 use timely::dataflow::operators::{Map, UnorderedInput};
 use timely::dataflow::scopes::Child;
 use timely::dataflow::{Scope, ScopeParent};
@@ -89,48 +90,53 @@ where
             // Create a new local input (exposed as TABLEs to users). Data is inserted
             // via SequencedCommand::Insert commands.
             SourceConnector::Local(_) => {
-                // WIP is src_id or orig_id the right thing to pass in here?
-                let persisted_source = if let Some(persist) = &mut render_state.persist {
-                    if let Some(stream_name) = persist.stream_name(src_id, &src) {
-                        let token = persist
-                            .persister
-                            .create_or_load(&stream_name)
-                            .expect("WIP this could be an error if the persistence runtime has unexpectedly shut down, what do we do with this?");
-                        let ((handle, capability), ok_stream, err_stream) =
-                            scope.new_persistent_unordered_input(token);
-                        let ok_stream = ok_stream.map(|(row, ts, diff)| {
-                            let row = Row::decode(&row)
-                                .expect("WIP this should be emitted in err_collection");
-                            (row, ts, diff)
-                        });
-                        let err_collection = err_stream
-                            .map(|(err, ts, diff)| {
-                                // WIP figure out what to do here
-                                let err = DecodeError::Text(err).into();
-                                (err, ts, diff)
+                let ((handle, capability), ok_stream, err_collection) = {
+                    let ((handle, capability), ok_stream) = scope.new_unordered_input();
+                    let err_collection = Collection::empty(scope);
+                    (
+                        (LocalInputHandle::Transient(handle), capability),
+                        ok_stream,
+                        err_collection,
+                    )
+                };
+
+                let (ok_stream, err_collection) = if let Some(persist) = &mut render_state.persist {
+                    if let Some(stream_name) = persist.stream_name(orig_id) {
+                        let persisted_stream = persist.persister.create_or_load(&stream_name);
+                        let (persist_ok_stream, persist_err_stream) = match persisted_stream {
+                            Ok((_, read)) => replay(scope, &read),
+                            Err(err) => {
+                                let ok_stream = empty(scope);
+                                // WIP what do we do here for ts? is this just fundamentally a bad idea?
+                                let err_stream = vec![(err.to_string(), 0, 1)].to_stream(scope);
+                                (ok_stream, err_stream)
+                            }
+                        };
+                        let (persist_ok_stream, decode_err_stream) =
+                            persist_ok_stream.ok_err(|((row, ()), ts, diff)| {
+                                let row = Row::decode(&row).map_err(|err| (err, ts, diff))?;
+                                Ok((row, ts, diff))
+                            });
+                        let persist_err_collection = persist_err_stream
+                            .concat(&decode_err_stream)
+                            .map(move |(err, ts, diff)| {
+                                let err = SourceError::new(
+                                    stream_name.clone(),
+                                    SourceErrorDetails::Persistence(err),
+                                );
+                                (err.into(), ts, diff)
                             })
                             .as_collection();
-                        Some((
-                            (LocalInputHandle::Persistent(handle), capability),
-                            ok_stream,
-                            err_collection,
-                        ))
+                        (
+                            ok_stream.concat(&persist_ok_stream),
+                            err_collection.concat(&persist_err_collection),
+                        )
                     } else {
-                        None
+                        (ok_stream, err_collection)
                     }
                 } else {
-                    None
+                    (ok_stream, err_collection)
                 };
-                let ((handle, capability), ok_stream, err_collection) = persisted_source
-                    .unwrap_or_else(|| {
-                        let ((handle, capability), ok_stream) = scope.new_unordered_input();
-                        let err_collection = Collection::empty(scope);
-                        (
-                            (LocalInputHandle::Transient(handle), capability),
-                            ok_stream,
-                            err_collection,
-                        )
-                    });
 
                 render_state.local_inputs.insert(
                     src_id,

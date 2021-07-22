@@ -37,6 +37,7 @@
 
 use std::cell::RefCell;
 use std::cmp;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
@@ -54,6 +55,9 @@ use futures::future::{self, FutureExt, TryFutureExt};
 use futures::stream::{self, StreamExt};
 use itertools::Itertools;
 use lazy_static::lazy_static;
+use persist::error::Error as PersistError;
+use persist::indexed::runtime::{CmdResponse, StreamWriteHandle};
+use persist::storage::SeqNo;
 use rand::Rng;
 use repr::adt::numeric;
 use timely::communication::WorkerGuards;
@@ -66,7 +70,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use build_info::BuildInfo;
 use dataflow::{
-    PersistConfig, SequencedCommand, TimestampBindingFeedback, WorkerFeedback,
+    PersistConfig, PersisterWithConfig, SequencedCommand, TimestampBindingFeedback, WorkerFeedback,
     WorkerFeedbackWithMeta,
 };
 use dataflow_types::logging::LoggingConfig as DataflowLoggingConfig;
@@ -240,6 +244,41 @@ pub struct Coordinator {
     txn_reads: HashMap<u32, TxnReads>,
     /// Tracks write frontiers for active exactly-once sinks.
     sink_writes: HashMap<GlobalId, SinkWrites<Timestamp>>,
+
+    persist: PersistWithStreams,
+}
+
+struct PersistWithStreams {
+    persist: Option<PersisterWithConfig>,
+    persisted_streams: HashMap<GlobalId, StreamWriteHandle<Vec<u8>, ()>>,
+}
+
+impl PersistWithStreams {
+    fn new(persist: Option<PersisterWithConfig>) -> Self {
+        PersistWithStreams {
+            persist,
+            persisted_streams: HashMap::new(),
+        }
+    }
+
+    fn stream(&mut self, id: GlobalId) -> Option<&mut StreamWriteHandle<Vec<u8>, ()>> {
+        match self.persisted_streams.entry(id) {
+            Entry::Occupied(x) => Some(x.into_mut()),
+            Entry::Vacant(x) => {
+                if let Some(persist) = &mut self.persist {
+                    if let Some(stream_name) = persist.stream_name(id) {
+                        let (write, _) =
+                            persist.persister.create_or_load(&stream_name).expect("WIP");
+                        Some(x.insert(write))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
 }
 
 /// Metadata about an active connection.
@@ -2185,11 +2224,30 @@ impl Coordinator {
                                 })
                                 .collect();
 
-                            self.broadcast(SequencedCommand::Insert {
-                                id,
-                                updates,
-                                tx: Some(tx.clone()),
-                            });
+                            if let Some(write) = self.persist.stream(id) {
+                                let updates: Vec<((Vec<u8>, ()), u64, isize)> = updates
+                                    .iter()
+                                    .map(|u| {
+                                        let mut encoded_row = Vec::new();
+                                        u.row.encode(&mut encoded_row);
+                                        ((encoded_row, ()), u.timestamp, u.diff)
+                                    })
+                                    .collect();
+                                let tx = tx.clone();
+                                let callback = Box::new(move |res: Result<SeqNo, PersistError>| {
+                                    let res = res.map(|_| ()).map_err(|err| err.to_string());
+                                    if let Err(err) = tx.send(res) {
+                                        log::debug!(
+                                            "error notifying insert of completion: {}",
+                                            err
+                                        );
+                                    }
+                                });
+                                write.write(&updates, CmdResponse::Callback(callback));
+                            }
+
+                            // TODO: Move this to happen in the callback.
+                            self.broadcast(SequencedCommand::Insert { id, updates });
                         }
                         Some(rx)
                     }
@@ -2992,20 +3050,28 @@ impl Coordinator {
         let timestamp = self.get_write_ts() + timestamp_offset;
         updates.sort_by_key(|u| u.id);
         for (id, updates) in &updates.into_iter().group_by(|u| u.id) {
-            self.broadcast(SequencedCommand::Insert {
-                id,
-                updates: updates
-                    .into_iter()
-                    .map(|u| Update {
-                        row: u.row,
-                        diff: u.diff,
-                        timestamp,
+            let updates: Vec<Update> = updates
+                .into_iter()
+                .map(|u| Update {
+                    row: u.row,
+                    diff: u.diff,
+                    timestamp,
+                })
+                .collect();
+            // Persistence of system table inserts is best effort, so throw
+            // away the response.
+            if let Some(write) = self.persist.stream(id) {
+                let updates: Vec<((Vec<u8>, ()), u64, isize)> = updates
+                    .iter()
+                    .map(|u| {
+                        let mut encoded_row = Vec::new();
+                        u.row.encode(&mut encoded_row);
+                        ((encoded_row, ()), u.timestamp, u.diff)
                     })
-                    .collect(),
-                // Persistence of system table inserts is best effort, so throw
-                // away the response.
-                tx: None,
-            })
+                    .collect();
+                write.write(&updates, CmdResponse::Ignore);
+            }
+            self.broadcast(SequencedCommand::Insert { id, updates })
         }
     }
 
@@ -3355,7 +3421,7 @@ pub async fn serve(
 
     let (worker_txs, worker_rxs): (Vec<_>, Vec<_>) =
         (0..workers).map(|_| crossbeam_channel::unbounded()).unzip();
-    let worker_guards = dataflow::serve(dataflow::Config {
+    let (worker_guards, persist) = dataflow::serve(dataflow::Config {
         command_receivers: worker_rxs,
         timely_worker,
         experimental_mode,
@@ -3441,6 +3507,7 @@ pub async fn serve(
                 since_updates: Rc::new(RefCell::new(HashMap::new())),
                 sink_writes: HashMap::new(),
                 now,
+                persist: PersistWithStreams::new(persist),
             };
             coord.broadcast(SequencedCommand::EnableFeedback(feedback_tx));
             if let Some(config) = &logging {
@@ -3526,7 +3593,7 @@ pub fn serve_debug(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (internal_cmd_tx, internal_cmd_rx) = mpsc::unbounded_channel();
     let (worker_tx, worker_rx) = crossbeam_channel::unbounded();
-    let worker_guards = dataflow::serve(dataflow::Config {
+    let (worker_guards, persist) = dataflow::serve(dataflow::Config {
         command_receivers: vec![worker_rx],
         timely_worker: timely::WorkerConfig::default(),
         experimental_mode: true,
@@ -3597,6 +3664,7 @@ pub fn serve_debug(
             since_updates: Rc::new(RefCell::new(HashMap::new())),
             sink_writes: HashMap::new(),
             now: get_debug_timestamp,
+            persist: PersistWithStreams::new(persist),
         };
         coord.broadcast(SequencedCommand::EnableFeedback(feedback_tx));
         let bootstrap = handle.block_on(coord.bootstrap(builtin_table_updates));

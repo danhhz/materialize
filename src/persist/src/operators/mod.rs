@@ -21,7 +21,8 @@ use crate::indexed::Snapshot;
 pub mod input;
 pub mod stream;
 
-fn replay<G: Scope<Timestamp = u64>, K: Data, V: Data>(
+/// WIP
+pub fn replay<G: Scope<Timestamp = u64>, K: Data, V: Data>(
     scope: &mut G,
     read: &StreamReadHandle<K, V>,
 ) -> (
