@@ -16,14 +16,13 @@ use std::{cmp, env, process};
 use ore::metrics::MetricsRegistry;
 use ore::now::{system_time, NowFn};
 use persist::file::{FileBlob, FileLog};
-use persist::indexed::runtime::{self, RuntimeClient, StreamReadHandle};
-use persist::operators::stream::Persist;
+use persist::indexed::runtime::{self, RuntimeClient, StreamReadHandle, StreamWriteHandle};
 use persist::storage::LockInfo;
-use persist::Data;
+use persist::{Codec, Data};
 use timely::dataflow::channels::pact::Pipeline;
 use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
 use timely::dataflow::operators::generic::{operator, source, FrontieredInputHandle};
-use timely::dataflow::operators::{Inspect, Operator, ToStream};
+use timely::dataflow::operators::{Concat, Inspect, Map, Operator, ToStream};
 use timely::dataflow::{Scope, Stream};
 
 fn construct_persistent_kafka_upsert_source<G: Scope<Timestamp = u64>>(
@@ -68,24 +67,25 @@ fn construct_persistent_kafka_upsert_source<G: Scope<Timestamp = u64>>(
         }
         start_offset = cmp::max(start_offset, offset);
     }
+    println!("Restored offset: {:?}", start_offset);
+    // we don't want to repeat what we emitted last
+    let start_offset = KafkaOffset(start_offset.0 + 1);
+    println!("Start offset: {:?}", start_offset);
 
-    println!("Restored start offset: {:?}", start_offset);
+    let out_ok_prev = prev_value_by_key
+        .into_values()
+        .to_stream(scope)
+        .map(|((k, v), ts, diff)| ((k, format!("{} (restored)", v)), ts, diff));
 
-    // TODO: not used for now
-    let _out_ok_prev = prev_value_by_key.into_values().to_stream(scope);
-
-    let raw_source = fake_kafka(scope, start_offset);
+    let raw_source = fake_kafka(scope, start_offset, system_time, 1000);
 
     let (records, bindings) = assign_timestamps(scope, raw_source, system_time, 1000);
-    let (bindings_ok, _bindings_err) = bindings.persist((ts_write, ts_read));
 
-    bindings_ok.inspect(|binding| println!("New binding: {:?}", binding));
+    // TODO: wire up errors
+    let out_ok_new = persist_records_and_bindings(scope, records, bindings, out_write, ts_write);
+    let out_err_new = operator::empty(scope);
 
-    let records = wait_for_bindings(scope, records, bindings_ok);
-
-    let (out_ok_new, out_err_new) = records.persist((out_write, out_read));
-
-    let ok_stream = out_ok_new;
+    let ok_stream = out_ok_new.concat(&out_ok_prev);
     let err_stream = out_err_new;
     Ok((ok_stream, err_stream))
 }
@@ -109,16 +109,28 @@ struct AssignedTimestamp(u64);
 fn fake_kafka<G: Scope<Timestamp = u64>>(
     scope: &mut G,
     starting_offset: KafkaOffset,
+    now_fn: NowFn,
+    interval_ms: u64,
 ) -> Stream<G, ((String, String), KafkaOffset, isize)> {
     source(scope, "fake_kafka", |mut cap, info| {
         let mut offset = starting_offset.0;
+        let current_ts = now_fn();
+        let mut current_ts = current_ts - (current_ts % interval_ms);
+
         let activator = scope.activator_for(&info.address[..]);
         move |output| {
             cap.downgrade(&offset);
-            let kv = (format!("k{}", offset % 10), format!("v{}", offset));
-            output.session(&cap).give((kv, KafkaOffset(offset), 1));
-            offset += 1;
-            activator.activate_after(Duration::from_secs(1));
+
+            let now = now_fn();
+            let now_clamped = now - (now % interval_ms);
+            if now_clamped != current_ts {
+                current_ts = now_clamped;
+                let kv = (format!("k{}", offset % 10), format!("v{}", offset));
+                output.session(&cap).give((kv, KafkaOffset(offset), 1));
+                offset += 1;
+            }
+
+            activator.activate_after(Duration::from_millis(100));
         }
     })
 }
@@ -195,39 +207,66 @@ where
 
 /// Joins a stream of records to a stream of bindings. Records are stashed until we have a binding
 /// that covers their offset/timestamp.
-fn wait_for_bindings<G, D>(
+fn persist_records_and_bindings<G, K, V>(
     _scope: &mut G,
-    records: Stream<G, (D, (KafkaOffset, AssignedTimestamp), isize)>,
+    records: Stream<G, ((K, V), (KafkaOffset, AssignedTimestamp), isize)>,
     bindings: Stream<G, ((KafkaOffset, AssignedTimestamp), u64, isize)>,
-) -> Stream<G, (D, u64, isize)>
+    records_write: StreamWriteHandle<K, V>,
+    bindings_write: StreamWriteHandle<KafkaOffset, AssignedTimestamp>,
+) -> Stream<G, ((K, V), u64, isize)>
 where
     G: Scope<Timestamp = u64>,
-    D: timely::Data,
+    K: timely::Data + Codec,
+    V: timely::Data + Codec,
 {
     let mut records_buffer = Vec::new();
     let mut bindings_buffer = Vec::new();
 
     let mut record_stash = HashMap::new();
-    // TODO: keep a proper map of bindings, to really check if a record is covered.
-    let mut max_binding = 0;
+    let mut bindings_stash = HashMap::new();
 
-    records.binary(
+    let mut current_seal_ts = 0;
+
+    records.binary_frontier(
         &bindings,
         Pipeline,
         Pipeline,
         "Await Bindings",
         move |_capability, _info| {
             move |records_input, bindings_input, output| {
-                bindings_input.for_each(|_time, data| {
+                bindings_input.for_each(|time, data| {
                     data.swap(&mut bindings_buffer);
 
-                    for ((_offset, binding), _ts, _diff) in bindings_buffer.drain(..) {
-                        max_binding = std::cmp::max(binding.0, max_binding);
+                    bindings_write
+                        .write(bindings_buffer.iter().as_ref())
+                        .recv()
+                        .expect("writing bindings");
+
+                    let stash_entry = bindings_stash
+                        .entry(time.retain())
+                        .or_insert_with(|| Vec::new());
+
+                    for binding in bindings_buffer.drain(..) {
+                        println!("Stashing binding: {:?}", binding);
+                        stash_entry.push(binding);
                     }
                 });
 
                 records_input.for_each(|time, data| {
                     data.swap(&mut records_buffer);
+
+                    // TODO: Don't copy so much here. We need to think about what the "timestamp"
+                    // of records should be here. Do we need the Offset still?
+                    let massaged_records = records_buffer
+                        .iter()
+                        .map(|((k, v), ts, diff)| ((k.clone(), v.clone()), ts.1 .0, diff.clone()))
+                        .collect::<Vec<_>>();
+
+                    records_write
+                        .write(massaged_records.iter())
+                        .recv()
+                        .expect("writing records");
+
                     let stash_entry = record_stash
                         .entry(time.retain())
                         .or_insert_with(|| Vec::new());
@@ -237,19 +276,49 @@ where
                     }
                 });
 
-                // TODO: Add real check for whether a given time/offset is covered.
-                let closed_ts: Vec<_> = record_stash
-                    .keys()
-                    .filter(|time| *time.time() <= max_binding)
-                    .cloned()
-                    .collect();
+                // if there are more elements than first, we would have a problem
+                let bindings_frontier = bindings_input.frontier().frontier().first().cloned();
+                let records_frontier = records_input.frontier().frontier().first().cloned();
 
-                for closed_ts in closed_ts {
-                    let mut records = record_stash.remove(&closed_ts).expect("missing records");
-                    let mut output_session = output.session(&closed_ts);
-                    for (record, ts, diff) in records.drain(..) {
-                        output_session.give((record, ts.1 .0, diff));
+                match (bindings_frontier, records_frontier) {
+                    (Some(bindings_frontier), Some(records_frontier)) => {
+                        let combined_frontier = std::cmp::min(bindings_frontier, records_frontier);
+                        if combined_frontier > current_seal_ts {
+                            current_seal_ts = combined_frontier;
+                            println!("sealing up to {}", current_seal_ts);
+
+                            bindings_write
+                                .seal(combined_frontier)
+                                .recv()
+                                .expect("sealing bindings");
+                            records_write
+                                .seal(combined_frontier)
+                                .recv()
+                                .expect("sealing records");
+
+                            // TODO: Add real check for whether a given time/offset is covered. Or
+                            // maybe not, because all we really need is that the read offsets are
+                            // persisted. Which they are now.
+                            bindings_stash
+                                .retain(|time, _bindings| *time.time() >= combined_frontier);
+
+                            let closed_ts: Vec<_> = record_stash
+                                .keys()
+                                .filter(|time| *time.time() <= combined_frontier)
+                                .cloned()
+                                .collect();
+
+                            for closed_ts in closed_ts {
+                                let mut records =
+                                    record_stash.remove(&closed_ts).expect("missing records");
+                                let mut output_session = output.session(&closed_ts);
+                                for (record, ts, diff) in records.drain(..) {
+                                    output_session.give((record, ts.1 .0, diff));
+                                }
+                            }
+                        }
                     }
+                    _ => (),
                 }
             }
         },
