@@ -38,9 +38,18 @@ fn construct_persistent_kafka_upsert_source<G: Scope<Timestamp = u64>>(
 > {
     let (ts_write, ts_read) =
         persist.create_or_load::<KafkaOffset, AssignedTimestamp>(&format!("{}_ts", name_base))?;
-    let (out_write, out_read) =
-        persist.create_or_load::<String, String>(&format!("{}_out", name_base))?;
-    let start_ts = cmp::min(sealed_ts(&ts_read)?, sealed_ts(&out_read)?);
+    let (out_write, out_read) = persist
+        .create_or_load::<(String, String), (KafkaOffset, AssignedTimestamp)>(&format!(
+            "{}_out",
+            name_base
+        ))?;
+
+    let epoch_interval_ms = 1000;
+    let source_interval_ms = 2000;
+    let timestamp_interval_ms = 5000;
+
+    let start_epoch = cmp::min(sealed_ts(&ts_read)?, sealed_ts(&out_read)?);
+    println!("Restored start epoch: {}", start_epoch);
 
     // Reload upsert state.
     // - TODO: Make this a third stream
@@ -51,7 +60,7 @@ fn construct_persistent_kafka_upsert_source<G: Scope<Timestamp = u64>>(
     // - TODO: Don't use read_to_end_flattened
     let mut prev_value_by_key = HashMap::new();
     for ((k, v), ts, diff) in out_read.snapshot()?.read_to_end_flattened()? {
-        if ts > start_ts {
+        if ts > start_epoch {
             continue;
         }
         prev_value_by_key.insert(k.clone(), ((k, v), ts, diff));
@@ -62,7 +71,7 @@ fn construct_persistent_kafka_upsert_source<G: Scope<Timestamp = u64>>(
     // - TODO: Is this even actually how to find the right start offset?
     let mut start_offset = KafkaOffset(0);
     for ((offset, _), ts, _) in ts_read.snapshot()?.read_to_end_flattened()? {
-        if ts > start_ts {
+        if ts > start_epoch {
             continue;
         }
         start_offset = cmp::max(start_offset, offset);
@@ -72,20 +81,34 @@ fn construct_persistent_kafka_upsert_source<G: Scope<Timestamp = u64>>(
     let start_offset = KafkaOffset(start_offset.0 + 1);
     println!("Start offset: {:?}", start_offset);
 
-    let out_ok_prev = prev_value_by_key
+    println!("Restored output: {:?}", prev_value_by_key);
+
+    // let out_ok_prev = prev_value_by_key
+    prev_value_by_key
         .into_values()
         .to_stream(scope)
-        .map(|((k, v), ts, diff)| ((k, format!("{} (restored)", v)), ts, diff));
+        .map(|((k, v), ts, diff)| ((k, format!("{:?} (restored)", v)), ts, diff))
+        .inspect(|x| println!("{:?}", x));
 
-    let raw_source = fake_kafka(scope, start_offset, system_time, 1000);
+    let epoch_source = epoch_source(scope, start_epoch, system_time, epoch_interval_ms);
 
-    let (records, bindings) = assign_timestamps(scope, raw_source, system_time, 1000);
+    let raw_source = fake_kafka(
+        scope,
+        epoch_source,
+        start_offset,
+        system_time,
+        source_interval_ms,
+    );
+
+    let (records, bindings) =
+        assign_timestamps(scope, raw_source, system_time, timestamp_interval_ms);
 
     // TODO: wire up errors
     let out_ok_new = persist_records_and_bindings(scope, records, bindings, out_write, ts_write);
     let out_err_new = operator::empty(scope);
 
-    let ok_stream = out_ok_new.concat(&out_ok_prev);
+    // let ok_stream = out_ok_new.concat(&out_ok_prev);
+    let ok_stream = out_ok_new;
     let err_stream = out_err_new;
     Ok((ok_stream, err_stream))
 }
@@ -106,20 +129,49 @@ struct KafkaOffset(u64);
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Default)]
 struct AssignedTimestamp(u64);
 
+fn epoch_source<G: Scope<Timestamp = u64>>(
+    scope: &mut G,
+    start_epoch: u64,
+    now_fn: NowFn,
+    interval_ms: u64,
+) -> Stream<G, ()> {
+    source(scope, "epoch_source", |mut cap, info| {
+        let mut current_epoch = start_epoch;
+
+        let activator = scope.activator_for(&info.address[..]);
+        move |output| {
+            let now = now_fn();
+            let now_clamped = now - (now % interval_ms);
+
+            if now_clamped != current_epoch {
+                current_epoch = now_clamped;
+                cap.downgrade(&current_epoch);
+                let mut session = output.session(&cap);
+                session.give(());
+            }
+
+            activator.activate_after(Duration::from_millis(100));
+        }
+    })
+}
+
 fn fake_kafka<G: Scope<Timestamp = u64>>(
     scope: &mut G,
+    epoch_input: Stream<G, ()>,
     starting_offset: KafkaOffset,
     now_fn: NowFn,
     interval_ms: u64,
 ) -> Stream<G, ((String, String), KafkaOffset, isize)> {
-    source(scope, "fake_kafka", |mut cap, info| {
+    epoch_input.unary_frontier(Pipeline, "fake_kafka", |mut cap, info| {
         let mut offset = starting_offset.0;
         let current_ts = now_fn();
         let mut current_ts = current_ts - (current_ts % interval_ms);
 
         let activator = scope.activator_for(&info.address[..]);
-        move |output| {
-            cap.downgrade(&offset);
+        move |input, output| {
+            input.for_each(|time, _data| {
+                std::mem::swap(&mut cap, &mut time.retain());
+            });
 
             let now = now_fn();
             let now_clamped = now - (now % interval_ms);
@@ -146,7 +198,7 @@ fn assign_timestamps<G, D>(
     now_fn: NowFn,
     update_interval_ms: u64,
 ) -> (
-    Stream<G, (D, (KafkaOffset, AssignedTimestamp), isize)>,
+    Stream<G, ((D, (KafkaOffset, AssignedTimestamp)), u64, isize)>,
     Stream<G, ((KafkaOffset, AssignedTimestamp), u64, isize)>,
 )
 where
@@ -180,23 +232,33 @@ where
                 let mut bindings_session = bindings.session(&bindings_capability);
                 bindings_session.give((
                     (KafkaOffset(current_offset), AssignedTimestamp(current_ts)),
-                    current_ts,
+                    bindings_capability.time().clone(),
                     1,
                 ));
 
                 current_ts = now_clamped;
-                records_capability.downgrade(&current_ts);
-                bindings_capability.downgrade(&current_ts);
             }
 
-            assign_input.for_each(|_time, data| {
+            assign_input.for_each(|time, data| {
+                let output_timestamp = time.clone();
+                let mut new_cap = time.retain();
+                if time.time() > records_capability.time() {
+                    records_capability.downgrade(time);
+                }
+                if time.time() > bindings_capability.time() {
+                    bindings_capability.downgrade(time);
+                }
                 data.swap(&mut buffer);
 
                 let mut records_session = records.session(&records_capability);
 
                 for (record, offset, diff) in buffer.drain(..) {
                     current_offset = std::cmp::max(offset.0, current_offset);
-                    records_session.give((record, (offset, AssignedTimestamp(current_ts)), diff));
+                    records_session.give((
+                        (record, (offset, AssignedTimestamp(current_ts))),
+                        output_timestamp,
+                        diff,
+                    ));
                 }
             });
         }
@@ -209,9 +271,9 @@ where
 /// that covers their offset/timestamp.
 fn persist_records_and_bindings<G, K, V>(
     _scope: &mut G,
-    records: Stream<G, ((K, V), (KafkaOffset, AssignedTimestamp), isize)>,
+    records: Stream<G, (((K, V), (KafkaOffset, AssignedTimestamp)), u64, isize)>,
     bindings: Stream<G, ((KafkaOffset, AssignedTimestamp), u64, isize)>,
-    records_write: StreamWriteHandle<K, V>,
+    records_write: StreamWriteHandle<(K, V), (KafkaOffset, AssignedTimestamp)>,
     bindings_write: StreamWriteHandle<KafkaOffset, AssignedTimestamp>,
 ) -> Stream<G, ((K, V), u64, isize)>
 where
@@ -255,15 +317,8 @@ where
                 records_input.for_each(|time, data| {
                     data.swap(&mut records_buffer);
 
-                    // TODO: Don't copy so much here. We need to think about what the "timestamp"
-                    // of records should be here. Do we need the Offset still?
-                    let massaged_records = records_buffer
-                        .iter()
-                        .map(|((k, v), ts, diff)| ((k.clone(), v.clone()), ts.1 .0, diff.clone()))
-                        .collect::<Vec<_>>();
-
                     records_write
-                        .write(massaged_records.iter())
+                        .write(records_buffer.iter().as_ref())
                         .recv()
                         .expect("writing records");
 
@@ -312,8 +367,8 @@ where
                                 let mut records =
                                     record_stash.remove(&closed_ts).expect("missing records");
                                 let mut output_session = output.session(&closed_ts);
-                                for (record, ts, diff) in records.drain(..) {
-                                    output_session.give((record, ts.1 .0, diff));
+                                for ((record, binding), _epoch_ts, diff) in records.drain(..) {
+                                    output_session.give((record, binding.1 .0, diff));
                                 }
                             }
                         }
