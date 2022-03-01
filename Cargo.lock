@@ -3525,6 +3525,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "mz-persist-client"
+version = "0.0.0"
+dependencies = [
+ "arrow2",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "aws-types",
+ "base64",
+ "bincode",
+ "bytes",
+ "criterion",
+ "crossbeam-channel",
+ "differential-dataflow",
+ "fail",
+ "futures-executor",
+ "futures-util",
+ "lazy_static",
+ "md-5",
+ "mz-aws-util",
+ "mz-build-info",
+ "mz-ore",
+ "mz-persist-types",
+ "parquet2",
+ "prost",
+ "prost-build",
+ "rand",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "timely",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "mz-persist-types"
 version = "0.0.0"
 dependencies = [
