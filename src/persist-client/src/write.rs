@@ -9,12 +9,12 @@
 
 use std::marker::PhantomData;
 
-use mz_persist_types::Codec;
-use timely::progress::Antichain;
+use differential_dataflow::difference::Semigroup;
+use mz_persist_types::{Codec, Codec64};
+use timely::progress::{Antichain, Timestamp};
 use tracing::warn;
 
 use crate::error::Error;
-use crate::{DurableDiff, DurableTimestamp};
 
 pub struct WriteHandle<K, V, T, D> {
     _phantom: PhantomData<(K, V, T, D)>,
@@ -24,8 +24,8 @@ impl<K, V, T, D> WriteHandle<K, V, T, D>
 where
     K: Codec,
     V: Codec,
-    T: DurableTimestamp,
-    D: DurableDiff,
+    T: Timestamp + Codec64,
+    D: Semigroup + Codec64,
 {
     // This handle's upper frontier, not the global collection-level one.
     pub fn upper(&self) -> &Antichain<T> {

@@ -7,12 +7,14 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+#![allow(clippy::todo)]
+
 //! A proposal for alternate persist API, reinvented for platform.
 
 use std::marker::PhantomData;
 
 use differential_dataflow::difference::Semigroup;
-use mz_persist_types::Codec;
+use mz_persist_types::{Codec, Codec64};
 use serde::{Deserialize, Serialize};
 use timely::progress::Timestamp;
 
@@ -76,30 +78,6 @@ pub struct Location {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct Id([u8; 16]);
 
-pub trait DurableTimestamp: Timestamp {
-    // WIP: Figure out the requirements here. E.g. if we can require timestamps
-    // be roundtrip-able as 8 bytes, persist can do some nice performance things
-    // in it's internal columnar storage format.
-    //
-    // WIP: An alternative is to separate out this encode and decode into a
-    // Codec64 trait and require only the necessary Timestamp vs Codec64 bounds
-    // in various places.
-    fn encode(&self) -> [u8; 8];
-    fn decode(buf: [u8; 8]) -> Self;
-}
-
-pub trait DurableDiff: Semigroup {
-    // WIP: Figure out the requirements here. E.g. if we can require timestamps
-    // be roundtrip-able as 8 bytes, persist can do some nice performance things
-    // in it's internal columnar storage format.
-    //
-    // WIP: An alternative is to separate out this encode and decode into a
-    // Codec64 trait and require only the necessary Semigroup vs Codec64 bounds
-    // in various places.
-    fn encode(&self) -> [u8; 8];
-    fn decode(buf: [u8; 8]) -> Self;
-}
-
 pub struct Client {
     _phantom: PhantomData<()>,
 }
@@ -115,8 +93,8 @@ impl Client {
     where
         K: Codec,
         V: Codec,
-        T: DurableTimestamp,
-        D: DurableDiff,
+        T: Timestamp + Codec64,
+        D: Semigroup + Codec64,
     {
         todo!();
     }
@@ -128,8 +106,8 @@ impl Client {
     where
         K: Codec,
         V: Codec,
-        T: DurableTimestamp,
-        D: DurableDiff,
+        T: Timestamp + Codec64,
+        D: Semigroup + Codec64,
     {
         todo!("{:?}", id)
     }

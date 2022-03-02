@@ -12,13 +12,14 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use differential_dataflow::difference::Semigroup;
 use futures_util::Stream;
-use mz_persist_types::Codec;
+use mz_persist_types::{Codec, Codec64};
 use serde::{Deserialize, Serialize};
-use timely::progress::Antichain;
+use timely::progress::{Antichain, Timestamp};
 use tracing::warn;
 
-use crate::{DurableDiff, DurableTimestamp, Error};
+use crate::error::Error;
 
 // WIP This probably doesn't need to be Clone, so I've omitted it for now.
 // Pretty sure we could make that work if necessary.
@@ -54,8 +55,8 @@ impl<K, V, T, D> ReadHandle<K, V, T, D>
 where
     K: Codec,
     V: Codec,
-    T: DurableTimestamp,
-    D: DurableDiff,
+    T: Timestamp + Codec64,
+    D: Semigroup + Codec64,
 {
     // This handle's since frontier, not the global collection-level one.
     pub fn since(&self) -> &Antichain<T> {
