@@ -11,6 +11,7 @@
 
 use std::cmp;
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -26,6 +27,7 @@ use futures_executor::block_on;
 use futures_util::FutureExt;
 use mz_ore::task::RuntimeExt;
 use tokio::runtime::Handle as AsyncHandle;
+use tokio::sync::Mutex;
 use tracing::{debug, trace};
 use uuid::Uuid;
 
@@ -39,8 +41,10 @@ use crate::storage::{Atomicity, Blob, BlobRead, LockInfo};
 #[derive(Clone, Debug)]
 pub struct S3BlobConfig {
     client: S3Client,
-    bucket: String,
-    prefix: String,
+    /// WIP
+    pub bucket: String,
+    /// WIP
+    pub prefix: String,
 }
 
 impl S3BlobConfig {
@@ -732,6 +736,53 @@ impl Blob for S3Blob {
             .await
             .map_err(|err| Error::from(err.to_string()))?;
         Ok(())
+    }
+}
+
+/// WIP temporary artifact of fast prototyping
+#[derive(Debug, Clone)]
+pub struct S3BlobMultiWriter {
+    blob: Arc<Mutex<S3Blob>>,
+}
+
+impl S3BlobMultiWriter {
+    /// Returns a new [S3BlobMultiWriter] opened for multi-writer usage.
+    pub fn open_multi_writer(config: S3BlobConfig) -> Self {
+        let core = S3BlobCore {
+            client: Some(config.client),
+            bucket: config.bucket,
+            prefix: config.prefix,
+            max_keys: 1_000,
+            multipart_config: MultipartConfig::default(),
+        };
+        let blob = S3Blob { core };
+        let blob = S3BlobMultiWriter {
+            blob: Arc::new(Mutex::new(blob)),
+        };
+        blob
+    }
+
+    /// WIP
+    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
+        self.blob.lock().await.get(key).await
+    }
+
+    /// WIP
+    pub async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, Error> {
+        // WIP more efficient implementation to take advantage of the prefix
+        let keys = self.blob.lock().await.list_keys().await?;
+        let keys = keys.into_iter().filter(|x| x.starts_with(prefix)).collect();
+        Ok(keys)
+    }
+
+    /// WIP
+    pub async fn set(&self, key: &str, value: Vec<u8>, atomic: Atomicity) -> Result<(), Error> {
+        self.blob.lock().await.set(key, value, atomic).await
+    }
+
+    /// WIP
+    pub async fn delete(&self, key: &str) -> Result<(), Error> {
+        self.blob.lock().await.delete(key).await
     }
 }
 

@@ -12,12 +12,61 @@
 // which places need structured information back about errors we can't recover
 // from.
 #[derive(Debug)]
-pub struct Error;
+pub struct Error {
+    // WIP switch to anyhow here too
+    inner: String,
+}
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!("{:?}", f.width())
+        self.inner.fmt(f)
     }
 }
 
 impl std::error::Error for Error {}
+
+impl From<mz_persist::error::Error> for Error {
+    fn from(x: mz_persist::error::Error) -> Self {
+        Error {
+            inner: x.to_string(),
+        }
+    }
+}
+
+impl From<String> for Error {
+    fn from(x: String) -> Self {
+        Error { inner: x }
+    }
+}
+
+impl From<&str> for Error {
+    fn from(x: &str) -> Self {
+        Error {
+            inner: x.to_owned(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Permanent {
+    inner: anyhow::Error,
+}
+
+// WIP doc that this means permanent _to the caller_. E.g. if some data is
+// corrupted, but it exists redundantly elsewhere, then it's possible that
+// retrying at a higher level of the stack could succeed.
+impl Permanent {
+    // NB: Intentionally not From to make it blindingly obvious at which points
+    // we're calling an error permanent.
+    pub fn new(inner: anyhow::Error) -> Self {
+        Permanent { inner }
+    }
+}
+
+impl std::fmt::Display for Permanent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+impl std::error::Error for Permanent {}

@@ -9,28 +9,58 @@
 
 use std::marker::PhantomData;
 
+use anyhow::anyhow;
+use bytes::BufMut;
 use differential_dataflow::difference::Semigroup;
+use differential_dataflow::trace::Description;
+use mz_persist::indexed::columnar::ColumnarRecordsVecBuilder;
+use mz_persist::indexed::encoding::BlobTraceBatchPart;
+use mz_persist::storage::Atomicity;
 use mz_persist_types::{Codec, Codec64};
+use serde::{Deserialize, Serialize};
 use timely::progress::{Antichain, Timestamp};
+use tracing::{debug, trace};
+use uuid::Uuid;
 
-use crate::error::Error;
+use crate::collection::Collection;
+use crate::error::Permanent;
+use crate::paths::Paths;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct WriterId(pub(crate) [u8; 16]);
+
+impl std::fmt::Display for WriterId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&Uuid::from_bytes(self.0), f)
+    }
+}
+
+impl WriterId {
+    fn new() -> Self {
+        WriterId(Uuid::new_v4().as_bytes().to_owned())
+    }
+}
 
 pub struct WriteHandle<K, V, T, D> {
-    _phantom: PhantomData<(K, V, T, D)>,
+    pub(crate) collection: Collection,
+    pub(crate) writer_id: WriterId,
+    pub(crate) _phantom: PhantomData<(K, V, D)>,
+
+    pub(crate) upper: Antichain<T>,
 }
 
 /// A "capability" granting the ability to apply updates to some collection at
 /// times greater or equal to `self.upper()`.
 impl<K, V, T, D> WriteHandle<K, V, T, D>
 where
-    K: Codec,
-    V: Codec,
+    K: Codec + std::fmt::Debug,
+    V: Codec + std::fmt::Debug,
     T: Timestamp + Codec64,
     D: Semigroup + Codec64,
 {
     // This handle's upper frontier, not the global collection-level one.
     pub fn upper(&self) -> &Antichain<T> {
-        todo!()
+        &self.upper
     }
 
     /// Applies `updates` to this collection and downgrades this handle's upper
@@ -51,17 +81,111 @@ where
         &mut self,
         updates: I,
         new_upper: Antichain<T>,
-    ) -> Result<(), Error> {
-        todo!("{:?}{:?}", updates.into_iter().size_hint(), new_upper);
+    ) -> Result<(), Permanent> {
+        let lower = self.upper.clone();
+        let since = Antichain::from_elem(T::minimum());
+        let desc = Description::new(lower, new_upper, since);
+
+        // WIP verify lower vs upper
+
+        let key = Paths::pending_batch_key(&self.collection.id, &self.writer_id, &desc);
+        let mut value = Vec::new();
+        Self::encode_batch(&mut value, &desc, updates)?;
+
+        debug!("writing batch {}", key);
+        self.collection
+            .blob
+            .set(&key, value, Atomicity::RequireAtomic)
+            .await
+            .expect("WIP retry loop");
+        self.upper = desc.upper().clone();
+        Ok(())
     }
 
-    pub async fn clone(&self) -> Result<Self, Error> {
+    pub async fn clone(&self) -> Result<Self, Permanent> {
         todo!();
+    }
+
+    fn encode_batch<'a, B, I>(
+        buf: &mut B,
+        desc: &Description<T>,
+        updates: I,
+    ) -> Result<(), Permanent>
+    where
+        B: BufMut,
+        I: IntoIterator<Item = ((&'a K, &'a V), &'a T, &'a D)>,
+    {
+        let iter = updates.into_iter();
+        let size_hint = iter.size_hint();
+
+        let (mut key_buf, mut val_buf) = (Vec::new(), Vec::new());
+        let mut builder = ColumnarRecordsVecBuilder::default();
+        for ((k, v), t, d) in iter {
+            if !desc.lower().less_equal(&t) || desc.upper().less_equal(&t) {
+                return Err(Permanent::new(anyhow!(
+                    "entry timestamp {:?} doesn't fit in batch desc: {:?}",
+                    t,
+                    desc
+                )));
+            }
+
+            trace!("writing update {:?}", ((k, v), t, d));
+            key_buf.clear();
+            val_buf.clear();
+            k.encode(&mut key_buf);
+            v.encode(&mut val_buf);
+            // WIP get rid of these from_le_bytes calls
+            let t = u64::from_le_bytes(T::encode(t));
+            let d = i64::from_le_bytes(D::encode(d));
+
+            if builder.len() == 0 {
+                // Use the first record to attempt to pre-size the builder
+                // allocations. This uses the iter's size_hint's lower+1 to
+                // match the logic in Vec.
+                let (lower, _) = size_hint;
+                let additional = usize::saturating_add(lower, 1);
+                builder.reserve(additional, key_buf.len(), val_buf.len());
+            }
+            builder.push(((&key_buf, &val_buf), t, d))
+        }
+
+        // WIP get rid of these from_le_bytes calls
+        let desc = Description::new(
+            Antichain::from(
+                desc.lower()
+                    .elements()
+                    .iter()
+                    .map(|x| u64::from_le_bytes(T::encode(x)))
+                    .collect::<Vec<_>>(),
+            ),
+            Antichain::from(
+                desc.upper()
+                    .elements()
+                    .iter()
+                    .map(|x| u64::from_le_bytes(T::encode(x)))
+                    .collect::<Vec<_>>(),
+            ),
+            Antichain::from(
+                desc.since()
+                    .elements()
+                    .iter()
+                    .map(|x| u64::from_le_bytes(T::encode(x)))
+                    .collect::<Vec<_>>(),
+            ),
+        );
+
+        let batch = BlobTraceBatchPart {
+            desc,
+            updates: builder.finish(),
+            index: 0,
+        };
+        batch.encode(buf);
+        Ok(())
     }
 }
 
 impl<K, V, T, D> Drop for WriteHandle<K, V, T, D> {
     fn drop(&mut self) {
-        todo!()
+        // WIP
     }
 }

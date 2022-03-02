@@ -9,6 +9,7 @@ publish = false
 # WIP: Cut this down to the actual set of deps once prototyping settles a bit.
 
 [dependencies]
+anyhow = "1.0.55"
 arrow2 = { version = "0.8.1", features = ["io_ipc", "io_parquet"] }
 async-trait = "0.1.0"
 aws-config = { version = "0.8.0", default-features = false, features = ["native-tls"] }
@@ -28,6 +29,7 @@ mz-aws-util = { path = "../aws-util", features = ["s3"] }
 mz-build-info = { path = "../build-info" }
 mz-ore = { path = "../ore", default-features = false, features = ["metrics", "task"] }
 mz-persist-types = { path = "../persist-types" }
+mz-persist = { path = "../persist" }
 parquet2 = { version = "0.8.1", default-features = false }
 prost = "0.9.0"
 semver = "1.0.6"

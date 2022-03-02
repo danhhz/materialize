@@ -58,7 +58,11 @@ pub trait Codec: Sized + 'static {
 // diffs be roundtrip-able as 8 bytes, persist can do some nice performance
 // things in its internal columnar storage format compared to if they were tied
 // to the more general Codec above.
-pub trait Codec64: Sized + 'static {
+//
+// WIP: Get rid of this FromStr and Display
+pub trait Codec64:
+    Sized + 'static + std::fmt::Display + std::str::FromStr<Err = std::num::ParseIntError>
+{
     /// Name of the codec.
     ///
     /// This name is stored for the timestamp and diff when a stream is first

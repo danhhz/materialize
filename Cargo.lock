@@ -3528,6 +3528,7 @@ dependencies = [
 name = "mz-persist-client"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "arrow2",
  "async-trait",
  "aws-config",
@@ -3547,6 +3548,7 @@ dependencies = [
  "mz-aws-util",
  "mz-build-info",
  "mz-ore",
+ "mz-persist",
  "mz-persist-types",
  "parquet2",
  "prost",

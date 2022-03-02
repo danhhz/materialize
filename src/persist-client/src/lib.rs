@@ -7,24 +7,39 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-#![allow(clippy::todo)]
+#![allow(dead_code, clippy::todo)]
 
 //! A proposal for alternate persist API, reinvented for platform.
 
 use std::marker::PhantomData;
+use std::sync::Arc;
 
+use anyhow::anyhow;
+use async_trait::async_trait;
 use differential_dataflow::difference::Semigroup;
+use differential_dataflow::lattice::Lattice;
+use mz_persist::s3::{S3BlobConfig, S3BlobMultiWriter};
 use mz_persist_types::{Codec, Codec64};
 use serde::{Deserialize, Serialize};
-use timely::progress::Timestamp;
+use timely::progress::{Antichain, Timestamp};
+use tokio::sync::Mutex;
+use tracing::trace;
+use uuid::Uuid;
 
-use crate::error::Error;
-use crate::read::ReadHandle;
-use crate::write::WriteHandle;
+use crate::collection::Collection;
+use crate::error::{Error, Permanent};
+use crate::metadata::CollectionMeta;
+use crate::read::{ReadHandle, ReaderId};
+use crate::write::{WriteHandle, WriterId};
 
 pub mod error;
 pub mod read;
 pub mod write;
+
+mod collection;
+mod descs;
+mod metadata;
+mod paths;
 
 // Notes
 // - Pretend that everything I've marked with Serialize and Deserialize instead
@@ -78,18 +93,23 @@ pub struct Location {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct Id([u8; 16]);
 
-impl Id {
-    /// Returns a random [Id] that is reasonably likely to have never been
-    /// generated before.
-    pub fn new() -> Self {
-        todo!()
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&Uuid::from_bytes(self.0), f)
     }
 }
 
-/// A handle for interacting with the set of persist collection made durable at
-/// a single [Location].
+impl Id {
+    /// Returns a random [Id] that is reasonably likely to have never been
+    /// generated before.
+    fn new() -> Self {
+        Id(Uuid::new_v4().as_bytes().to_owned())
+    }
+}
+
 pub struct Client {
-    _phantom: PhantomData<()>,
+    blob: S3BlobMultiWriter,
+    log: Arc<MemLog>,
 }
 
 impl Client {
@@ -99,8 +119,15 @@ impl Client {
     /// The same `location` may be used concurrently from multiple processes.
     /// Concurrent usage is subject to the constraints documented on individual
     /// methods (mostly [WriteHandle::write_batch]).
-    pub async fn new(location: Location) -> Result<Self, Error> {
-        todo!("{:?}", location)
+    pub async fn new(location: Location, role_arn: Option<String>) -> Result<Self, Permanent> {
+        let config = S3BlobConfig::new(location.bucket, location.prefix, role_arn)
+            .await
+            .map_err(|err| Permanent::new(anyhow!(err)))?;
+        let blob = S3BlobMultiWriter::open_multi_writer(config);
+        let log = Arc::new(MemLog::default());
+        // WIP verify that blob and log match to catch operator error, probably
+        // by writing a new uuid to each of them when they're initialized
+        Ok(Client { blob, log })
     }
 
     /// Binds `id` to an empty durable TVC.
@@ -112,14 +139,21 @@ impl Client {
     pub async fn new_collection<K, V, T, D>(
         &self,
         id: Id,
-    ) -> Result<(ReadHandle<K, V, T, D>, WriteHandle<K, V, T, D>), Error>
+    ) -> Result<(WriteHandle<K, V, T, D>, ReadHandle<K, V, T, D>), Permanent>
     where
-        K: Codec,
-        V: Codec,
-        T: Timestamp + Codec64,
+        K: Codec + std::fmt::Debug,
+        V: Codec + std::fmt::Debug,
+        T: Timestamp + Lattice + Codec64,
         D: Semigroup + Codec64,
     {
-        todo!("{:?}", id)
+        let (write, read) = self.open_collection(id).await?;
+        if read.since() != &Antichain::from_elem(T::minimum()) {
+            return Err(Permanent::new(anyhow!("id already exists")));
+        }
+        if write.upper() != &Antichain::from_elem(T::minimum()) {
+            return Err(Permanent::new(anyhow!("id already exists")));
+        }
+        Ok((write, read))
     }
 
     /// Provides capabilities for `id` at its current since and upper frontiers.
@@ -133,13 +167,203 @@ impl Client {
     pub async fn open_collection<K, V, T, D>(
         &self,
         id: Id,
-    ) -> Result<(ReadHandle<K, V, T, D>, WriteHandle<K, V, T, D>), Error>
+    ) -> Result<(WriteHandle<K, V, T, D>, ReadHandle<K, V, T, D>), Permanent>
     where
         K: Codec,
         V: Codec,
-        T: Timestamp + Codec64,
+        T: Timestamp + Lattice + Codec64,
         D: Semigroup + Codec64,
     {
-        todo!("{:?}", id)
+        let mut collection = Collection {
+            id,
+            blob: self.blob.clone(),
+            log: self.log.clone(),
+        };
+
+        let writer_id = WriterId(Uuid::new_v4().as_bytes().to_owned());
+        let reader_id = ReaderId(Uuid::new_v4().as_bytes().to_owned());
+
+        let (prev_meta, _new_meta) = collection
+            .update_metadata(|prev_meta| {
+                let mut meta = CollectionMeta {
+                    writers: vec![],
+                    readers: vec![],
+                    key_codec: K::codec_name(),
+                    val_codec: V::codec_name(),
+                    ts_codec: T::codec_name(),
+                    diff_codec: D::codec_name(),
+                };
+                if let Some(prev_meta) = prev_meta.as_ref() {
+                    meta.writers.extend(prev_meta.writers.iter().cloned());
+                    meta.readers.extend(prev_meta.readers.iter().cloned());
+                    // WIP don't panic here, return an error from
+                    // open_collection instead
+                    assert_eq!(K::codec_name(), prev_meta.key_codec);
+                    assert_eq!(V::codec_name(), prev_meta.val_codec);
+                    assert_eq!(T::codec_name(), prev_meta.ts_codec);
+                    assert_eq!(D::codec_name(), prev_meta.diff_codec);
+                }
+                meta.writers.push(writer_id.clone());
+                meta.readers.push(reader_id.clone());
+                meta
+            })
+            .await
+            .expect("WIP add retry loop");
+
+        // Fetch since and upper in parallel.
+        let prev_readers: &[ReaderId] = prev_meta.as_ref().map_or(&[], |x| x.readers.as_slice());
+        let prev_writers: &[WriterId] = prev_meta.as_ref().map_or(&[], |x| x.writers.as_slice());
+        let since = collection.fetch_sinces::<T>(prev_readers);
+        let upper = collection.fetch_uppers::<T>(prev_writers);
+        let since = since.await.expect("WIP add retry loop");
+        let upper = upper.await.expect("WIP add retry loop");
+
+        let write = WriteHandle {
+            collection: collection.clone(),
+            writer_id,
+            _phantom: PhantomData,
+            upper,
+        };
+        let read = ReadHandle {
+            collection,
+            reader_id,
+            _phantom: PhantomData,
+            since,
+        };
+
+        Ok((write, read))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SeqNo(u64);
+
+#[async_trait]
+pub trait Log: std::fmt::Debug + Send + 'static {
+    async fn current(&self) -> Result<(SeqNo, Option<Vec<u8>>), Error>;
+
+    async fn compare_and_set(
+        &self,
+        expected: SeqNo,
+        value: Option<Vec<u8>>,
+    ) -> Result<SeqNo, Error>;
+
+    async fn compact(&self, since: SeqNo) -> Result<(), Error>;
+}
+
+#[derive(Debug, Default)]
+pub struct MemLog {
+    entries: Mutex<Vec<(SeqNo, Option<Vec<u8>>)>>,
+}
+
+#[async_trait]
+impl Log for MemLog {
+    async fn current(&self) -> Result<(SeqNo, Option<Vec<u8>>), Error> {
+        let current = self
+            .entries
+            .lock()
+            .await
+            .last()
+            .map(|(seqno, entry)| (*seqno, entry.clone()))
+            .unwrap_or_else(|| (SeqNo::default(), None));
+        Ok(current)
+    }
+
+    async fn compare_and_set(
+        &self,
+        expected: SeqNo,
+        value: Option<Vec<u8>>,
+    ) -> Result<SeqNo, Error> {
+        let (current, _) = self.current().await?;
+        if current != expected {
+            return Err(format!("expected didn't match").into());
+        }
+        let next = SeqNo(current.0 + 1);
+        self.entries.lock().await.push((next, value));
+        trace!("Log::compare_and_set {:?}", self.entries);
+        Ok(next)
+    }
+
+    async fn compact(&self, _since: SeqNo) -> Result<(), Error> {
+        // WIP no-op
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use futures_util::StreamExt;
+    use mz_persist::s3::S3BlobConfig;
+    use tokio::runtime::Runtime;
+
+    use super::*;
+
+    #[test]
+    fn sanity_check() -> Result<(), Box<dyn std::error::Error>> {
+        mz_ore::test::init_logging_default("warn");
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (location, role_arn) = match S3BlobConfig::new_for_test().await? {
+                None => return Ok(()),
+                Some(cfg) => (
+                    Location {
+                        bucket: cfg.bucket,
+                        prefix: cfg.prefix,
+                    },
+                    None,
+                ),
+            };
+            let client = Client::new(location, role_arn).await?;
+            let (mut write, mut read) = client
+                .new_collection::<String, String, u64, i64>(Id::new())
+                .await?;
+
+            let expected = vec![(("1".to_owned(), "one".to_owned()), 1, 1)];
+            assert_eq!(write.upper(), &Antichain::from_elem(u64::minimum()));
+            write
+                .write_batch(
+                    expected.iter().map(|((k, v), t, d)| ((k, v), t, d)),
+                    Antichain::from_elem(2),
+                )
+                .await?;
+            assert_eq!(write.upper(), &Antichain::from_elem(2));
+
+            let mut snap = read
+                .snapshot(Antichain::from_elem(1), NonZeroUsize::new(1).unwrap())
+                .await?;
+            assert_eq!(snap.len(), 1);
+            let snap = snap.pop().unwrap();
+            let mut listen = read.listen(Antichain::from_elem(1)).await?;
+
+            let mut snap = read.snapshot_part(snap).await?.into_stream();
+            let actual = {
+                let mut data = Vec::new();
+                while let Some(record) = snap.next().await {
+                    data.push(record)
+                }
+                data
+            };
+            assert_eq!(actual, expected);
+
+            assert_eq!(read.since(), &Antichain::from_elem(u64::minimum()));
+            read.downgrade_since(Antichain::from_elem(2)).await;
+            assert_eq!(read.since(), &Antichain::from_elem(2));
+
+            let expected = vec![(("2".to_owned(), "two".to_owned()), 2, 1)];
+            write
+                .write_batch(
+                    expected.iter().map(|((k, v), t, d)| ((k, v), t, d)),
+                    Antichain::from_elem(3),
+                )
+                .await?;
+            assert_eq!(write.upper(), &Antichain::from_elem(3));
+
+            let actual = listen.poll_next().await;
+            assert_eq!(actual, expected);
+
+            Ok(())
+        })
     }
 }
