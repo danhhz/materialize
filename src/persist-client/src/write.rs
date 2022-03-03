@@ -12,7 +12,6 @@ use std::marker::PhantomData;
 use differential_dataflow::difference::Semigroup;
 use mz_persist_types::{Codec, Codec64};
 use timely::progress::{Antichain, Timestamp};
-use tracing::warn;
 
 use crate::error::Error;
 
@@ -20,6 +19,8 @@ pub struct WriteHandle<K, V, T, D> {
     _phantom: PhantomData<(K, V, T, D)>,
 }
 
+/// A "capability" granting the ability to apply updates to some collection at
+/// times greater or equal to `self.upper()`.
 impl<K, V, T, D> WriteHandle<K, V, T, D>
 where
     K: Codec,
@@ -32,18 +33,26 @@ where
         todo!()
     }
 
-    // NB new_upper of the empty antichain "finishes" this collection, promising
-    // that no more data is ever incoming
-    //
-    // TODO: Bound the write and space amplification as a function of how much
-    // data has even been written to this collection as well as how much of it
-    // is "live" (doesn't consolidate out at the collection frontier).
-    pub async fn write_batch<I: IntoIterator<Item = ((K, V), T, D)>>(
+    /// Applies `updates` to this collection and downgrades this handle's upper
+    /// to `new_upper`.
+    ///
+    /// All times in `updates` must be greater or equal to `self.upper()` and
+    /// not greater or equal to `new_upper`. A `new_upper` of the empty
+    /// antichain "finishes" this collection, promising
+    // that no more data is ever incoming.
+    ///
+    /// It is probably an error to call this with `new_upper` equal to
+    /// `self.upper()`, as it would mean `updates` must be empty.
+    ///
+    /// Multiple [WriteHandle]s may be used concurrently to write to the same
+    /// collection, but in this case, the data being written must be identical
+    /// (in the sense of "definite"-ness).
+    pub async fn write_batch<'a, I: IntoIterator<Item = ((&'a K, &'a V), &'a T, &'a D)>>(
         &mut self,
-        data: I,
+        updates: I,
         new_upper: Antichain<T>,
     ) -> Result<(), Error> {
-        todo!("{:?}{:?}", data.into_iter().size_hint(), new_upper);
+        todo!("{:?}{:?}", updates.into_iter().size_hint(), new_upper);
     }
 
     pub async fn clone(&self) -> Result<Self, Error> {
@@ -51,19 +60,8 @@ where
     }
 }
 
-impl<K, V, T, D> WriteHandle<K, V, T, D> {
-    pub async fn deregister(&mut self) -> Result<(), Error> {
-        todo!()
-    }
-}
-
 impl<K, V, T, D> Drop for WriteHandle<K, V, T, D> {
     fn drop(&mut self) {
-        // WIP: Thread a tokio runtime down instead?
-        futures_executor::block_on(async {
-            if let Err(err) = self.deregister().await {
-                warn!("failed to deregister WriteHandle on drop: {}", err)
-            }
-        })
+        todo!()
     }
 }

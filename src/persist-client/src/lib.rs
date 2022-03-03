@@ -44,30 +44,30 @@ pub mod write;
 //   this translate to a persist requirement as well?
 // - Figure out the contract of tokio Runtimes and who is responsible for making
 //   sure they're in the TLC.
-// - I've split up getting a snapshot vs tailing for new changes below, because
-//   I think it simplifies the story about multi-process snapshots. We could
-//   also instead do something more analogous to SubscribeAt from the formalism
-//   doc.
+// - I've split up getting a snapshot vs listening for new changes below,
+//   because I think it simplifies the story about multi-process snapshots. We
+//   could also instead do something more analogous to SubscribeAt from the
+//   formalism doc.
 // - We'll want to expose overall collection frontier information (since and
 //   upper) at the very least for introspection. There's a few options here so
 //   we should think about how this will be used.
 // - Leases for read and write handles, as described in formalism.
-// - I think some things (readers at least?) will want to connect to the persist
-//   controller over rpc. At the very least, this is something that we may want
-//   to hook up for latency optimizations (making inputs to the state machine
-//   push instead of pull). How does this information get plumbed around? Maybe
-//   a dns name that cloud is responsible for making sure points at the right
-//   thing?
 // - To what extent should this adopt the naming conventions for STORAGE used in
 //   the formalism doc? Many of them have direct analogues down at the persist
 //   level.
 // - At the moment, we have both a STORAGE collection concept as well as a
 //   persist collection concept. One of these should be renamed :).
 
+// TODO
+// - Develop a model for understanding the write amplification and space
+// amplification as a function of how much data has ever been written to this
+// collection as well as how much of it is "live" (doesn't consolidate out at
+// the collection frontier).
+
 /// A location in s3, other cloud storage, or otherwise "durable storage" used
 /// by persist. This location can contain any number of persist collections.
-///
-/// WIP: This also needs etcd (or whatever we pick) connection information.
+//
+// WIP: This also needs etcd (or whatever we pick) connection information.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Location {
     bucket: String,
@@ -78,17 +78,40 @@ pub struct Location {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct Id([u8; 16]);
 
+impl Id {
+    /// Returns a random [Id] that is reasonably likely to have never been
+    /// generated before.
+    pub fn new() -> Self {
+        todo!()
+    }
+}
+
+/// A handle for interacting with the set of persist collection made durable at
+/// a single [Location].
 pub struct Client {
     _phantom: PhantomData<()>,
 }
 
 impl Client {
+    /// Returns a new client for interfacing with persist collections made
+    /// durable to the given `location`.
+    ///
+    /// The same `location` may be used concurrently from multiple processes.
+    /// Concurrent usage is subject to the constraints documented on individual
+    /// methods (mostly [WriteHandle::write_batch]).
     pub async fn new(location: Location) -> Result<Self, Error> {
         todo!("{:?}", location)
     }
 
+    /// Binds `id` to an empty durable TVC.
+    ///
+    /// The command returns capabilities naming `id`, with frontiers set to
+    /// initial values set to `Antichain::from_elem(T::minimum())`.
+    ///
+    /// It is an error to re-use a previously used `id`.
     pub async fn new_collection<K, V, T, D>(
         &self,
+        id: Id,
     ) -> Result<(ReadHandle<K, V, T, D>, WriteHandle<K, V, T, D>), Error>
     where
         K: Codec,
@@ -96,9 +119,17 @@ impl Client {
         T: Timestamp + Codec64,
         D: Semigroup + Codec64,
     {
-        todo!();
+        todo!("{:?}", id)
     }
 
+    /// Provides capabilities for `id` at its current since and upper frontiers.
+    ///
+    /// This method is a best-effort attempt to regain control of the frontiers
+    /// of a collection. Its most common uses are to recover capabilities that
+    /// have expired (leases) or to attempt to read a TVC that one did not
+    /// create (or otherwise receive capabilities for). If the frontiers have
+    /// been fully released by all other parties, this call may result in
+    /// capabilities with empty frontiers (which are useless).
     pub async fn open_collection<K, V, T, D>(
         &self,
         id: Id,
