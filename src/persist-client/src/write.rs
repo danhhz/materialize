@@ -26,6 +26,9 @@ use crate::collection::Collection;
 use crate::error::Permanent;
 use crate::paths::Paths;
 
+// WIP do we actually want to be able to persist a WriterId? it's hard to
+// imagine what the semantics are of two processes accidentally using the same
+// id concurrently (e.g. restart after indeterminate failure)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct WriterId(pub(crate) [u8; 16]);
 

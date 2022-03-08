@@ -31,7 +31,8 @@ pub struct ReaderMeta {
 // the min of all reader sinces. WIP use actual antichain terminology here
 //
 // WIP this is stored in a path containing CollectionId. to keep it lean, this
-// isn't denormalized here.
+// isn't denormalized here. note to self, now that we've added a bunch of stuff
+// to this, may as well add CollectionId back.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CollectionMeta {
     pub(crate) writers: Vec<WriterId>,
@@ -42,4 +43,15 @@ pub struct CollectionMeta {
     pub(crate) val_codec: String,
     pub(crate) ts_codec: String,
     pub(crate) diff_codec: String,
+
+    // WIP this is going to want to be a different structure for compaction, but
+    // I think just moving data in is enough to de-risk it.
+    pub(crate) trace: Vec<(String, TraceBatchMeta)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraceBatchMeta {
+    lower: Vec<[u8; 8]>,
+    upper: Vec<[u8; 8]>,
+    since: Vec<[u8; 8]>,
 }

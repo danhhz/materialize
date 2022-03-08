@@ -38,6 +38,7 @@ pub mod write;
 
 mod collection;
 mod descs;
+mod machine;
 mod metadata;
 mod paths;
 
@@ -192,6 +193,7 @@ impl Client {
                     val_codec: V::codec_name(),
                     ts_codec: T::codec_name(),
                     diff_codec: D::codec_name(),
+                    trace: Vec::new(),
                 };
                 if let Some(prev_meta) = prev_meta.as_ref() {
                     meta.writers.extend(prev_meta.writers.iter().cloned());
