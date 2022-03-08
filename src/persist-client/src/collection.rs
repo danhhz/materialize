@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use anyhow::anyhow;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::trace::Description;
 use mz_persist::s3::S3BlobMultiWriter;
@@ -19,7 +20,6 @@ use timely::progress::{Antichain, Timestamp};
 use uuid::Uuid;
 
 use crate::descs::BatchDescs;
-use crate::error::Error;
 use crate::metadata::{CollectionMeta, ReaderMeta, WriterMeta};
 use crate::paths::Paths;
 use crate::read::ReaderId;
@@ -37,7 +37,7 @@ impl Collection {
     pub async fn update_metadata<F: FnMut(&Option<CollectionMeta>) -> CollectionMeta>(
         &mut self,
         mut f: F,
-    ) -> Result<(Option<CollectionMeta>, CollectionMeta), Error> {
+    ) -> Result<(Option<CollectionMeta>, CollectionMeta), anyhow::Error> {
         // TODO: Retry on failure.
         let (_, mut prev_meta) = self.fetch_meta().await?;
         loop {
@@ -54,7 +54,7 @@ impl Collection {
 
     pub async fn fetch_since<T: Timestamp + Lattice + Codec64>(
         &self,
-    ) -> Result<Antichain<T>, Error> {
+    ) -> Result<Antichain<T>, anyhow::Error> {
         let (_, meta) = self.fetch_meta().await?;
         let meta = meta.expect("WIP");
         self.fetch_sinces(meta.readers.as_slice()).await
@@ -63,7 +63,7 @@ impl Collection {
     pub async fn fetch_sinces<T: Timestamp + Lattice + Codec64>(
         &self,
         readers: &[ReaderId],
-    ) -> Result<Antichain<T>, Error> {
+    ) -> Result<Antichain<T>, anyhow::Error> {
         let metas = readers.iter().map(|x| self.fetch_reader_meta(x));
         let mut ret = Antichain::from_elem(T::minimum());
         for meta in metas {
@@ -77,7 +77,7 @@ impl Collection {
 
     pub async fn fetch_upper<T: Timestamp + Lattice + Codec64>(
         &self,
-    ) -> Result<Antichain<T>, Error> {
+    ) -> Result<Antichain<T>, anyhow::Error> {
         let (_, meta) = self.fetch_meta().await?;
         let meta = meta.expect("WIP");
         self.fetch_uppers(meta.writers.as_slice()).await
@@ -86,7 +86,7 @@ impl Collection {
     pub async fn fetch_uppers<T: Timestamp + Lattice + Codec64>(
         &self,
         writers: &[WriterId],
-    ) -> Result<Antichain<T>, Error> {
+    ) -> Result<Antichain<T>, anyhow::Error> {
         let metas = writers.iter().map(|x| self.fetch_writer_meta(x));
         let mut ret = Antichain::from_elem(T::minimum());
         for meta in metas {
@@ -98,7 +98,9 @@ impl Collection {
         Ok(ret)
     }
 
-    pub async fn fetch_batch_descs<T: Timestamp + Codec64>(&self) -> Result<BatchDescs<T>, Error> {
+    pub async fn fetch_batch_descs<T: Timestamp + Codec64>(
+        &self,
+    ) -> Result<BatchDescs<T>, anyhow::Error> {
         let pending = self
             .blob
             .list_prefix(&Paths::pending_batch_prefix(&self.id))
@@ -119,19 +121,20 @@ impl Collection {
         Ok(BatchDescs(descs))
     }
 
-    async fn fetch_current_meta_key(&self) -> Result<(SeqNo, Option<String>), Error> {
+    async fn fetch_current_meta_key(&self) -> Result<(SeqNo, Option<String>), anyhow::Error> {
         let (current, value) = self.log.current().await?;
         let value = match value {
             Some(x) => x,
             None => return Ok((current, None)),
         };
-        let value = String::from_utf8(value).map_err(|_err| "invalid CURRENT_META")?;
+        let value =
+            String::from_utf8(value).map_err(|err| anyhow!("invalid CURRENT_META: {}", err))?;
         Ok((current, Some(value)))
     }
 
     // WIP I think we probably want to make this not an Option and just
     // specialize the new collection case?
-    async fn fetch_meta(&self) -> Result<(SeqNo, Option<CollectionMeta>), Error> {
+    async fn fetch_meta(&self) -> Result<(SeqNo, Option<CollectionMeta>), anyhow::Error> {
         let (current, key) = self.fetch_current_meta_key().await?;
         let key = match key {
             Some(x) => x,
@@ -140,9 +143,9 @@ impl Collection {
         let value = self.blob.get(&key).await?;
         // NB: A missing current_meta_key means a new collection, but if we get
         // a key back and that key is missing, that's unexpected.
-        let value = value.ok_or("missing collection metadata")?;
+        let value = value.ok_or(anyhow!("missing collection metadata"))?;
         let meta: CollectionMeta = bincode::deserialize(value.as_slice())
-            .map_err(|_err| "corrupted collection metadata")?;
+            .map_err(|err| anyhow!("corrupted collection metadata: {}", err))?;
         Ok((current, Some(meta)))
     }
 
@@ -150,7 +153,7 @@ impl Collection {
         &self,
         expected: &Option<CollectionMeta>,
         new: &CollectionMeta,
-    ) -> Result<Option<CollectionMeta>, Error> {
+    ) -> Result<Option<CollectionMeta>, anyhow::Error> {
         // WIP this is an entirely incorrect implementation of compare and set.
         // we'll actually want to use something like etcd
         let (current, durable) = self.fetch_meta().await?;
@@ -159,7 +162,8 @@ impl Collection {
         }
 
         let key = Paths::version_key(&self.id, Uuid::new_v4());
-        let value = bincode::serialize(&new).map_err(|_err| "encoding collection metadata")?;
+        let value = bincode::serialize(&new)
+            .map_err(|err| anyhow!("encoding collection metadata: {}", err))?;
         self.blob.set(&key, value, Atomicity::RequireAtomic).await?;
 
         self.log
@@ -169,21 +173,21 @@ impl Collection {
         Ok(Some(new.clone()))
     }
 
-    async fn fetch_reader_meta(&self, reader_id: &ReaderId) -> Result<ReaderMeta, Error> {
+    async fn fetch_reader_meta(&self, reader_id: &ReaderId) -> Result<ReaderMeta, anyhow::Error> {
         let key = Paths::reader_meta_key(&self.id, reader_id);
         let value = self.blob.get(&key).await?;
-        let value = value.ok_or("missing reader metadata")?;
-        let meta: ReaderMeta =
-            bincode::deserialize(value.as_slice()).map_err(|_err| "corrupted reader metadata")?;
+        let value = value.ok_or(anyhow!("missing reader metadata"))?;
+        let meta: ReaderMeta = bincode::deserialize(value.as_slice())
+            .map_err(|err| anyhow!("corrupted reader metadata: {}", err))?;
         Ok(meta)
     }
 
-    async fn fetch_writer_meta(&self, writer_id: &WriterId) -> Result<WriterMeta, Error> {
+    async fn fetch_writer_meta(&self, writer_id: &WriterId) -> Result<WriterMeta, anyhow::Error> {
         let key = Paths::writer_meta_key(&self.id, writer_id);
         let value = self.blob.get(&key).await?;
-        let value = value.ok_or("missing writer metadata")?;
-        let meta: WriterMeta =
-            bincode::deserialize(value.as_slice()).map_err(|_err| "corrupted writer metadata")?;
+        let value = value.ok_or(anyhow!("missing writer metadata"))?;
+        let meta: WriterMeta = bincode::deserialize(value.as_slice())
+            .map_err(|err| anyhow!("corrupted writer metadata: {}", err))?;
         Ok(meta)
     }
 
@@ -191,9 +195,10 @@ impl Collection {
         &self,
         reader_id: &ReaderId,
         meta: &ReaderMeta,
-    ) -> Result<(), Error> {
+    ) -> Result<(), anyhow::Error> {
         let key = Paths::reader_meta_key(&self.id, reader_id);
-        let value = bincode::serialize(meta).map_err(|_err| "encoding reader metadata")?;
+        let value =
+            bincode::serialize(meta).map_err(|err| anyhow!("encoding reader metadata: {}", err))?;
         self.blob.set(&key, value, Atomicity::RequireAtomic).await?;
         Ok(())
     }
@@ -202,9 +207,10 @@ impl Collection {
         &self,
         writer_id: &WriterId,
         meta: &WriterMeta,
-    ) -> Result<(), Error> {
+    ) -> Result<(), anyhow::Error> {
         let key = Paths::writer_meta_key(&self.id, writer_id);
-        let value = bincode::serialize(meta).map_err(|_err| "encoding reader metadata")?;
+        let value =
+            bincode::serialize(meta).map_err(|err| anyhow!("encoding reader metadata: {}", err))?;
         self.blob.set(&key, value, Atomicity::RequireAtomic).await?;
         Ok(())
     }

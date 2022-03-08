@@ -7,46 +7,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-// WIP: Define the semantics of this. In particular, we should use this
-// opportunity to think through where we need to push retries into persist and
-// which places need structured information back about errors we can't recover
-// from.
-#[derive(Debug)]
-pub struct Error {
-    // WIP switch to anyhow here too
-    inner: String,
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.inner.fmt(f)
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<mz_persist::error::Error> for Error {
-    fn from(x: mz_persist::error::Error) -> Self {
-        Error {
-            inner: x.to_string(),
-        }
-    }
-}
-
-impl From<String> for Error {
-    fn from(x: String) -> Self {
-        Error { inner: x }
-    }
-}
-
-impl From<&str> for Error {
-    fn from(x: &str) -> Self {
-        Error {
-            inner: x.to_owned(),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub struct Permanent {
     inner: anyhow::Error,

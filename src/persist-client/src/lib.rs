@@ -27,7 +27,7 @@ use tracing::trace;
 use uuid::Uuid;
 
 use crate::collection::Collection;
-use crate::error::{Error, Permanent};
+use crate::error::Permanent;
 use crate::metadata::CollectionMeta;
 use crate::read::{ReadHandle, ReaderId};
 use crate::write::{WriteHandle, WriterId};
@@ -240,15 +240,15 @@ pub struct SeqNo(u64);
 
 #[async_trait]
 pub trait Log: std::fmt::Debug + Send + 'static {
-    async fn current(&self) -> Result<(SeqNo, Option<Vec<u8>>), Error>;
+    async fn current(&self) -> Result<(SeqNo, Option<Vec<u8>>), anyhow::Error>;
 
     async fn compare_and_set(
         &self,
         expected: SeqNo,
         value: Option<Vec<u8>>,
-    ) -> Result<SeqNo, Error>;
+    ) -> Result<SeqNo, anyhow::Error>;
 
-    async fn compact(&self, since: SeqNo) -> Result<(), Error>;
+    async fn compact(&self, since: SeqNo) -> Result<(), anyhow::Error>;
 }
 
 #[derive(Debug, Default)]
@@ -258,7 +258,7 @@ pub struct MemLog {
 
 #[async_trait]
 impl Log for MemLog {
-    async fn current(&self) -> Result<(SeqNo, Option<Vec<u8>>), Error> {
+    async fn current(&self) -> Result<(SeqNo, Option<Vec<u8>>), anyhow::Error> {
         let current = self
             .entries
             .lock()
@@ -273,10 +273,10 @@ impl Log for MemLog {
         &self,
         expected: SeqNo,
         value: Option<Vec<u8>>,
-    ) -> Result<SeqNo, Error> {
+    ) -> Result<SeqNo, anyhow::Error> {
         let (current, _) = self.current().await?;
         if current != expected {
-            return Err(format!("expected didn't match").into());
+            return Err(anyhow!("expected didn't match"));
         }
         let next = SeqNo(current.0 + 1);
         self.entries.lock().await.push((next, value));
@@ -284,7 +284,7 @@ impl Log for MemLog {
         Ok(next)
     }
 
-    async fn compact(&self, _since: SeqNo) -> Result<(), Error> {
+    async fn compact(&self, _since: SeqNo) -> Result<(), anyhow::Error> {
         // WIP no-op
         Ok(())
     }

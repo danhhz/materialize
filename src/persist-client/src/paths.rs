@@ -7,12 +7,12 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use anyhow::anyhow;
 use differential_dataflow::trace::Description;
 use mz_persist_types::Codec64;
 use timely::progress::{Antichain, Timestamp};
 use uuid::Uuid;
 
-use crate::error::Error;
 use crate::read::ReaderId;
 use crate::write::WriterId;
 use crate::Id;
@@ -61,7 +61,7 @@ impl Paths {
 
     pub fn parse_batch_key<T: Timestamp + Codec64>(
         key: &str,
-    ) -> Result<(WriterId, Description<T>), Error> {
+    ) -> Result<(WriterId, Description<T>), anyhow::Error> {
         let mut parts = key.split('/');
         let _collection = parts.next().expect("WIP");
         let _pending = parts.next().expect("WIP");
@@ -69,7 +69,7 @@ impl Paths {
         let desc = parts.next().expect("WIP");
         assert!(parts.next().is_none());
 
-        let writer_id = Uuid::parse_str(writer_id).map_err(|err| err.to_string())?;
+        let writer_id = Uuid::parse_str(writer_id).map_err(|err| anyhow!(err))?;
         let writer_id = WriterId(*writer_id.as_bytes());
 
         let desc = Self::parse_desc(desc)?;
@@ -102,7 +102,7 @@ impl Paths {
         format!("{}-{}-{}", lower, upper, since)
     }
 
-    fn parse_desc<T: Timestamp + Codec64>(key: &str) -> Result<Description<T>, Error> {
+    fn parse_desc<T: Timestamp + Codec64>(key: &str) -> Result<Description<T>, anyhow::Error> {
         let mut parts = key.split('-');
         let lower = parts.next().expect("WIP");
         let upper = parts.next().expect("WIP");

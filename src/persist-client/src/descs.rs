@@ -12,13 +12,14 @@ use timely::progress::Timestamp;
 use timely::PartialOrder;
 use tracing::error;
 
-use crate::error::Error;
-
 #[derive(Debug)]
 pub struct BatchDescs<T>(pub(crate) Vec<(String, Description<T>)>);
 
 impl<T: Timestamp> BatchDescs<T> {
-    pub fn cover(self, query: &Description<T>) -> Result<Vec<(String, Description<T>)>, Error> {
+    pub fn cover(
+        self,
+        query: &Description<T>,
+    ) -> Result<Vec<(String, Description<T>)>, anyhow::Error> {
         let mut prev_upper = query.lower().clone();
         let mut batches = Vec::new();
         for (key, desc) in self.0 {
