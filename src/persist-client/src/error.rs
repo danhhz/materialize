@@ -8,6 +8,33 @@
 // by the Apache License, Version 2.0.
 
 #[derive(Debug)]
+pub struct StorageError {
+    inner: String,
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "storage: {}", self.inner)
+    }
+}
+
+impl std::error::Error for StorageError {}
+
+impl From<String> for StorageError {
+    fn from(inner: String) -> Self {
+        StorageError { inner }
+    }
+}
+
+impl From<&str> for StorageError {
+    fn from(x: &str) -> Self {
+        StorageError {
+            inner: x.to_owned(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Permanent {
     inner: anyhow::Error,
 }
@@ -25,7 +52,7 @@ impl Permanent {
 
 impl std::fmt::Display for Permanent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.inner.fmt(f)
+        write!(f, "permanent: {}", self.inner)
     }
 }
 
