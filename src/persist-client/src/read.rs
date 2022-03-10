@@ -27,7 +27,7 @@ use uuid::Uuid;
 use crate::collection::Collection;
 use crate::descs::BatchDescs;
 use crate::error::Permanent;
-use crate::machine::{Machine, State};
+use crate::machine::{Machine, ReadCapability, State};
 
 // WIP This probably doesn't need to be Clone, so I've omitted it for now.
 // Pretty sure we could make that work if necessary.
@@ -166,12 +166,15 @@ impl ReaderId {
 
 /// A "capability" granting the ability to read the state of some collection at
 /// times greater or equal to `self.since()`.
-pub struct ReadHandle<K, V, T, D> {
+pub struct ReadHandle<K, V, T, D>
+where
+    T: Timestamp + Lattice + Codec64,
+{
     pub(crate) machine: Machine<T>,
     pub(crate) reader_id: ReaderId,
     pub(crate) _phantom: PhantomData<(K, V, D)>,
 
-    pub(crate) since: Antichain<T>,
+    pub(crate) cap: ReadCapability<T>,
 }
 
 impl<K, V, T, D> ReadHandle<K, V, T, D>
@@ -183,7 +186,7 @@ where
 {
     /// This handle's since frontier, not the global collection-level one.
     pub fn since(&self) -> &Antichain<T> {
-        &self.since
+        &self.cap.since
     }
 
     /// Forwards the since frontier of this handle, giving up the ability to
@@ -195,11 +198,13 @@ where
     //
     // WIP AntichainRef?
     pub async fn downgrade_since(&mut self, new_since: Antichain<T>) {
+        // WIP note that this is allowed to run ahead of the state's view of it,
+        // but not vice-versa. otherwise GC is hard to reason about
+        self.cap.since = new_since;
         self.machine
-            .downgrade_since(&self.reader_id, &new_since)
+            .downgrade_since(&self.reader_id, &self.cap.since)
             .await
             .expect("WIP");
-        self.since = new_since;
     }
 
     /// Returns an ongoing stream of updates to a collection.
@@ -335,8 +340,23 @@ where
     }
 }
 
-impl<K, V, T, D> Drop for ReadHandle<K, V, T, D> {
+impl<K, V, T, D> ReadHandle<K, V, T, D>
+where
+    T: Timestamp + Lattice + Codec64,
+{
+    async fn deregister(&mut self) {
+        self.machine
+            .deregister_reader(&self.reader_id)
+            .await
+            .expect("WIP");
+    }
+}
+
+impl<K, V, T, D> Drop for ReadHandle<K, V, T, D>
+where
+    T: Timestamp + Lattice + Codec64,
+{
     fn drop(&mut self) {
-        // WIP
+        futures_executor::block_on(self.deregister())
     }
 }

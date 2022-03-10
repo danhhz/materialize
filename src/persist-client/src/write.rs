@@ -24,7 +24,7 @@ use tracing::{debug, trace};
 use uuid::Uuid;
 
 use crate::error::Permanent;
-use crate::machine::Machine;
+use crate::machine::{Machine, WriteCapability};
 use crate::paths::Paths;
 
 // WIP do we actually want to be able to persist a WriterId? it's hard to
@@ -45,12 +45,15 @@ impl WriterId {
     }
 }
 
-pub struct WriteHandle<K, V, T, D> {
+pub struct WriteHandle<K, V, T, D>
+where
+    T: Timestamp + Lattice + Codec64,
+{
     pub(crate) machine: Machine<T>,
     pub(crate) writer_id: WriterId,
     pub(crate) _phantom: PhantomData<(K, V, D)>,
 
-    pub(crate) upper: Antichain<T>,
+    pub(crate) cap: WriteCapability<T>,
 }
 
 /// A "capability" granting the ability to apply updates to some collection at
@@ -64,7 +67,7 @@ where
 {
     // This handle's upper frontier, not the global collection-level one.
     pub fn upper(&self) -> &Antichain<T> {
-        &self.upper
+        &self.cap.upper
     }
 
     /// Applies `updates` to this collection and downgrades this handle's upper
@@ -86,7 +89,7 @@ where
         updates: I,
         new_upper: Antichain<T>,
     ) -> Result<(), Permanent> {
-        let lower = self.upper.clone();
+        let lower = self.cap.upper.clone();
         let since = Antichain::from_elem(T::minimum());
         let desc = Description::new(lower, new_upper, since);
 
@@ -108,12 +111,8 @@ where
             .write_batch(&self.writer_id, &key, &desc)
             .await
             .expect("WIP");
-        self.upper = desc.upper().clone();
+        self.cap.upper = desc.upper().clone();
         Ok(())
-    }
-
-    pub async fn clone(&self) -> Result<Self, Permanent> {
-        todo!();
     }
 
     fn encode_batch<'a, B, I>(
@@ -194,8 +193,24 @@ where
     }
 }
 
-impl<K, V, T, D> Drop for WriteHandle<K, V, T, D> {
+impl<K, V, T, D> WriteHandle<K, V, T, D>
+where
+    T: Timestamp + Lattice + Codec64,
+{
+    async fn deregister(&mut self) {
+        self.machine
+            .deregister_writer(&self.writer_id)
+            .await
+            .expect("WIP");
+    }
+}
+
+// WIP ideally this wouldn't have the where clause
+impl<K, V, T, D> Drop for WriteHandle<K, V, T, D>
+where
+    T: Timestamp + Lattice + Codec64,
+{
     fn drop(&mut self) {
-        // WIP
+        futures_executor::block_on(self.deregister())
     }
 }

@@ -34,15 +34,15 @@ impl Collection {
     >(
         &mut self,
         mut f: F,
-    ) -> Result<(Option<CollectionMeta>, CollectionMeta, R), anyhow::Error> {
+    ) -> Result<(Option<CollectionMeta>, CollectionMeta, SeqNo, R), anyhow::Error> {
         // TODO: Retry on failure.
         let (prev_seqno, mut prev_meta) = self.fetch_meta().await?;
         loop {
             let (new_meta, ret) = f(prev_seqno, &prev_meta);
             // TODO: Retry on failure.
-            let durable_meta = self.cas_meta(&prev_meta, &new_meta).await?;
+            let (seqno, durable_meta) = self.cas_meta(&prev_meta, &new_meta).await?;
             if durable_meta.as_ref() == Some(&new_meta) {
-                return Ok((prev_meta.clone(), new_meta, ret));
+                return Ok((prev_meta.clone(), new_meta, seqno, ret));
             }
             // We lost a race, try again.
             prev_meta = durable_meta;
@@ -81,12 +81,14 @@ impl Collection {
         &self,
         expected: &Option<CollectionMeta>,
         new: &CollectionMeta,
-    ) -> Result<Option<CollectionMeta>, anyhow::Error> {
+    ) -> Result<(SeqNo, Option<CollectionMeta>), anyhow::Error> {
         // WIP this is an entirely incorrect implementation of compare and set.
         // we'll actually want to use something like etcd
         let (current, durable) = self.fetch_meta().await?;
         if &durable != expected {
-            return Ok(durable);
+            // WIP is current the right thing to return here or should we push
+            // SeqNo inside the Option?
+            return Ok((current, durable));
         }
 
         let key = Paths::version_key(&self.id, Uuid::new_v4());
@@ -94,11 +96,12 @@ impl Collection {
             .map_err(|err| anyhow!("encoding collection metadata: {}", err))?;
         self.blob.set(&key, value, Atomicity::RequireAtomic).await?;
 
-        self.log
+        let seqno = self
+            .log
             .compare_and_set(current, Some(key.into_bytes()))
             .await?;
 
-        Ok(Some(new.clone()))
+        Ok((seqno, Some(new.clone())))
     }
 
     async fn fetch_reader_meta(&self, reader_id: &ReaderId) -> Result<ReaderMeta, anyhow::Error> {

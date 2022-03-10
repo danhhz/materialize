@@ -184,19 +184,19 @@ impl Client {
 
         let writer_id = WriterId(Uuid::new_v4().as_bytes().to_owned());
         let reader_id = ReaderId(Uuid::new_v4().as_bytes().to_owned());
-        let (since, upper) = machine.register(&writer_id, &reader_id).await;
+        let (write_cap, read_cap) = machine.register(&writer_id, &reader_id).await;
 
         let write = WriteHandle {
             machine: machine.clone(),
             writer_id,
             _phantom: PhantomData,
-            upper,
+            cap: write_cap,
         };
         let read = ReadHandle {
             machine,
             reader_id,
             _phantom: PhantomData,
-            since,
+            cap: read_cap,
         };
 
         Ok((write, read))
