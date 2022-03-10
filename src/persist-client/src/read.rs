@@ -17,6 +17,7 @@ use differential_dataflow::lattice::Lattice;
 use differential_dataflow::trace::Description;
 use futures_util::Stream;
 use mz_persist::indexed::encoding::BlobTraceBatchPart;
+use mz_persist::storage::StorageError;
 use mz_persist_types::{Codec, Codec64};
 use serde::{Deserialize, Serialize};
 use timely::progress::{Antichain, Timestamp};
@@ -26,7 +27,7 @@ use uuid::Uuid;
 
 use crate::collection::Collection;
 use crate::descs::BatchDescs;
-use crate::error::Permanent;
+use crate::error::{InvalidUsage, Permanent};
 use crate::machine::{Machine, ReadCapability, State};
 
 // WIP This probably doesn't need to be Clone, so I've omitted it for now.
@@ -64,12 +65,12 @@ impl SnapshotPart {
 }
 
 pub struct SnapshotIter<K, V, T, D> {
-    updates: Vec<((K, V), T, D)>,
+    updates: Vec<((Result<K, String>, Result<V, String>), T, D)>,
 }
 
 impl<K, V, T, D> SnapshotIter<K, V, T, D> {
     // TODO: impl Stream directly on SnapshotIter
-    pub fn into_stream(self) -> impl Stream<Item = ((K, V), T, D)> {
+    pub fn into_stream(self) -> impl Stream<Item = ((Result<K, String>, Result<V, String>), T, D)> {
         futures_util::stream::iter(self.updates.into_iter())
     }
 }
@@ -90,10 +91,13 @@ where
     D: Semigroup + Codec64,
 {
     // WIP: We also need a way to delivery progress information from this.
-    pub async fn poll_next(&mut self, timeout: Duration) -> Vec<((K, V), T, D)> {
+    pub async fn poll_next(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Vec<((Result<K, String>, Result<V, String>), T, D)>, StorageError> {
         let deadline = Instant::now() + timeout;
         loop {
-            let (_, meta) = self.collection.fetch_meta(deadline).await.expect("WIP");
+            let (_, meta) = self.collection.fetch_meta(deadline).await?;
             let state = State::from_meta(meta.as_ref());
 
             let all_batch_descs = state.trace.clone();
@@ -105,12 +109,12 @@ where
                     continue;
                 } else if PartialOrder::less_equal(desc.lower(), &self.frontier) {
                     trace!("listen emitting {:?}", desc);
-                    let updates = self.fetch_batch_updates(deadline, &key).await.expect("WIP");
+                    let updates = self.fetch_batch_updates(deadline, &key).await?;
                     self.frontier = desc.upper().clone();
                     if updates.is_empty() {
                         continue;
                     }
-                    return updates;
+                    return Ok(updates);
                 } else {
                     todo!("TODO: More resilient implementation of this");
                 }
@@ -125,21 +129,19 @@ where
         &self,
         deadline: Instant,
         key: &str,
-    ) -> Result<Vec<((K, V), T, D)>, Permanent> {
+    ) -> Result<Vec<((Result<K, String>, Result<V, String>), T, D)>, StorageError> {
         let value = self
             .collection
             .blob
             .get(deadline, &key)
-            .await
-            .expect("WIP retry loop")
-            .ok_or_else(|| Permanent::new(anyhow!("internal error: missing batch")))?;
-        let batch =
-            BlobTraceBatchPart::decode(&value).map_err(|err| Permanent::new(anyhow!(err)))?;
+            .await?
+            .expect("internal error: missing batch");
+        let batch = BlobTraceBatchPart::decode(&value).map_err(|err| StorageError(anyhow!(err)))?;
         let mut updates = Vec::new();
         for chunk in batch.updates {
             for ((k, v), t, d) in chunk.iter() {
-                let k = K::decode(k).map_err(|err| Permanent::new(anyhow!(err)))?;
-                let v = V::decode(&v).map_err(|err| Permanent::new(anyhow!(err)))?;
+                let k = K::decode(k);
+                let v = V::decode(&v);
                 let t = T::decode(t.to_le_bytes());
                 let d = D::decode(d.to_le_bytes());
                 trace!("listen read {:?}", ((&k, &v), &t, &d));
@@ -202,15 +204,20 @@ where
     /// promising that no more data will ever be read by this handle.
     //
     // WIP AntichainRef?
-    pub async fn downgrade_since(&mut self, timeout: Duration, new_since: Antichain<T>) {
+    pub async fn downgrade_since(
+        &mut self,
+        timeout: Duration,
+        new_since: Antichain<T>,
+    ) -> Result<(), StorageError> {
         let deadline = Instant::now() + timeout;
         // WIP note that this is allowed to run ahead of the state's view of it,
         // but not vice-versa. otherwise GC is hard to reason about
         self.cap.since = new_since;
         self.machine
             .downgrade_since(deadline, &self.reader_id, &self.cap.since)
-            .await
-            .expect("WIP");
+            .await?
+            .expect("internal error: handle didn't correctly maintain since");
+        Ok(())
     }
 
     /// Returns an ongoing stream of updates to a collection.
@@ -260,15 +267,13 @@ where
         timeout: Duration,
         as_of: Antichain<T>,
         num_parts: NonZeroUsize,
-    ) -> Result<Vec<SnapshotPart>, Permanent> {
+    ) -> Result<Result<Vec<SnapshotPart>, InvalidUsage>, StorageError> {
         let deadline = Instant::now() + timeout;
-        let (_, meta) = self
-            .machine
-            .collection
-            .fetch_meta(deadline)
-            .await
-            .expect("WIP");
+        let (_, meta) = self.machine.collection.fetch_meta(deadline).await?;
         let state = State::from_meta(meta.as_ref());
+        if !PartialOrder::less_equal(&state.since(), &as_of) {
+            return Ok(Err(InvalidUsage(anyhow!("since not <= as_of"))));
+        }
         let all_batch_descs = BatchDescs(state.trace);
         debug!("all_batch_descs {:?}", all_batch_descs);
         let query_desc = Description::new(
@@ -277,7 +282,9 @@ where
             as_of.clone(),
         );
         debug!("query_desc {:?}", all_batch_descs);
-        let relevant_batch_descs = all_batch_descs.cover(&query_desc).expect("WIP");
+        let relevant_batch_descs = all_batch_descs
+            .cover(&query_desc)
+            .expect("internal error: couldn't cover valid as_of");
         debug!("relevant_batch_descs {:?}", relevant_batch_descs);
         let batches = relevant_batch_descs
             .into_iter()
@@ -286,7 +293,7 @@ where
         debug!("batches {:?}", batches);
         let parts = SnapshotPart::new(&as_of, &as_of, batches, num_parts);
         debug!("parts {:?}", parts);
-        Ok(parts)
+        Ok(Ok(parts))
     }
 
     /// Trade in an exchange-able [SnapshotPart] for its respective data.
@@ -303,7 +310,7 @@ where
         &self,
         timeout: Duration,
         part: SnapshotPart,
-    ) -> Result<SnapshotIter<K, V, T, D>, Permanent> {
+    ) -> Result<SnapshotIter<K, V, T, D>, StorageError> {
         let deadline = Instant::now() + timeout;
         let upper = Antichain::from(
             part.upper
@@ -327,15 +334,14 @@ where
                 .collection
                 .blob
                 .get(deadline, &key)
-                .await
-                .expect("WIP retry loop")
-                .ok_or_else(|| Permanent::new(anyhow!("internal error: missing batch")))?;
+                .await?
+                .expect("internal error: missing batch");
             let batch =
-                BlobTraceBatchPart::decode(&value).map_err(|err| Permanent::new(anyhow!(err)))?;
+                BlobTraceBatchPart::decode(&value).map_err(|err| StorageError(anyhow!(err)))?;
             for chunk in batch.updates {
                 for ((k, v), t, d) in chunk.iter() {
-                    let k = K::decode(k).map_err(|err| Permanent::new(anyhow!(err)))?;
-                    let v = V::decode(v).map_err(|err| Permanent::new(anyhow!(err)))?;
+                    let k = K::decode(k);
+                    let v = V::decode(v);
                     let mut t = T::decode(t.to_le_bytes());
                     let d = D::decode(d.to_le_bytes());
                     trace!("reading update {:?}", ((&k, &v), &t, &d));
@@ -359,11 +365,11 @@ impl<K, V, T, D> ReadHandle<K, V, T, D>
 where
     T: Timestamp + Lattice + Codec64,
 {
-    async fn deregister(&mut self, deadline: Instant) {
+    async fn deregister(&mut self, deadline: Instant) -> Result<(), StorageError> {
         self.machine
             .deregister_reader(deadline, &self.reader_id)
-            .await
-            .expect("WIP");
+            .await?;
+        Ok(())
     }
 }
 
@@ -372,6 +378,9 @@ where
     T: Timestamp + Lattice + Codec64,
 {
     fn drop(&mut self) {
-        futures_executor::block_on(self.deregister(Instant::now() + Duration::from_secs(1_000_000)))
+        futures_executor::block_on(
+            self.deregister(Instant::now() + Duration::from_secs(1_000_000)),
+        )
+        .expect("internal error: couldn't deregister read handle on drop");
     }
 }

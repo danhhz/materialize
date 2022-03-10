@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use differential_dataflow::difference::Semigroup;
 use differential_dataflow::lattice::Lattice;
 use mz_persist::s3::{S3BlobConfig, S3BlobMultiWriter};
+use mz_persist::storage::StorageError;
 use mz_persist_types::{Codec, Codec64};
 use serde::{Deserialize, Serialize};
 use timely::progress::{Antichain, Timestamp};
@@ -28,7 +29,7 @@ use tracing::trace;
 use uuid::Uuid;
 
 use crate::collection::Collection;
-use crate::error::Permanent;
+use crate::error::{InvalidUsage, Permanent};
 use crate::machine::Machine;
 use crate::read::{ReadHandle, ReaderId};
 use crate::write::{WriteHandle, WriterId};
@@ -142,7 +143,7 @@ impl Client {
         &self,
         timeout: Duration,
         id: Id,
-    ) -> Result<(WriteHandle<K, V, T, D>, ReadHandle<K, V, T, D>), Permanent>
+    ) -> Result<Result<(WriteHandle<K, V, T, D>, ReadHandle<K, V, T, D>), InvalidUsage>, StorageError>
     where
         K: Codec + std::fmt::Debug,
         V: Codec + std::fmt::Debug,
@@ -151,12 +152,12 @@ impl Client {
     {
         let (write, read) = self.open_collection(timeout, id).await?;
         if read.since() != &Antichain::from_elem(T::minimum()) {
-            return Err(Permanent::new(anyhow!("id already exists")));
+            return Ok(Err(InvalidUsage(anyhow!("id already exists"))));
         }
         if write.upper() != &Antichain::from_elem(T::minimum()) {
-            return Err(Permanent::new(anyhow!("id already exists")));
+            return Ok(Err(InvalidUsage(anyhow!("id already exists"))));
         }
-        Ok((write, read))
+        Ok(Ok((write, read)))
     }
 
     /// Provides capabilities for `id` at its current since and upper frontiers.
@@ -171,7 +172,7 @@ impl Client {
         &self,
         timeout: Duration,
         id: Id,
-    ) -> Result<(WriteHandle<K, V, T, D>, ReadHandle<K, V, T, D>), Permanent>
+    ) -> Result<(WriteHandle<K, V, T, D>, ReadHandle<K, V, T, D>), StorageError>
     where
         K: Codec,
         V: Codec,
@@ -189,7 +190,7 @@ impl Client {
 
         let writer_id = WriterId(Uuid::new_v4().as_bytes().to_owned());
         let reader_id = ReaderId(Uuid::new_v4().as_bytes().to_owned());
-        let (write_cap, read_cap) = machine.register(deadline, &writer_id, &reader_id).await;
+        let (write_cap, read_cap) = machine.register(deadline, &writer_id, &reader_id).await?;
 
         let write = WriteHandle {
             machine: machine.clone(),
@@ -217,16 +218,16 @@ pub struct CompareAndSet {
 
 #[async_trait]
 pub trait Log: std::fmt::Debug + Send + 'static {
-    async fn current(&self, deadline: Instant) -> Result<(SeqNo, Option<Vec<u8>>), anyhow::Error>;
+    async fn current(&self, deadline: Instant) -> Result<(SeqNo, Option<Vec<u8>>), StorageError>;
 
     async fn compare_and_set(
         &self,
         deadline: Instant,
         expected: SeqNo,
         value: Option<Vec<u8>>,
-    ) -> Result<Result<SeqNo, CompareAndSet>, anyhow::Error>;
+    ) -> Result<Result<SeqNo, CompareAndSet>, StorageError>;
 
-    async fn compact(&self, deadline: Instant, since: SeqNo) -> Result<(), anyhow::Error>;
+    async fn compact(&self, deadline: Instant, since: SeqNo) -> Result<(), StorageError>;
 }
 
 #[derive(Debug, Default)]
@@ -236,7 +237,7 @@ pub struct MemLog {
 
 #[async_trait]
 impl Log for MemLog {
-    async fn current(&self, _deadline: Instant) -> Result<(SeqNo, Option<Vec<u8>>), anyhow::Error> {
+    async fn current(&self, _deadline: Instant) -> Result<(SeqNo, Option<Vec<u8>>), StorageError> {
         let current = self
             .entries
             .lock()
@@ -252,7 +253,7 @@ impl Log for MemLog {
         deadline: Instant,
         expected: SeqNo,
         value: Option<Vec<u8>>,
-    ) -> Result<Result<SeqNo, CompareAndSet>, anyhow::Error> {
+    ) -> Result<Result<SeqNo, CompareAndSet>, StorageError> {
         let (current, _) = self.current(deadline).await?;
         if current != expected {
             return Ok(Err(CompareAndSet { current }));
@@ -263,7 +264,7 @@ impl Log for MemLog {
         Ok(Ok(next))
     }
 
-    async fn compact(&self, _deadline: Instant, _since: SeqNo) -> Result<(), anyhow::Error> {
+    async fn compact(&self, _deadline: Instant, _since: SeqNo) -> Result<(), StorageError> {
         // WIP no-op
         Ok(())
     }
@@ -300,7 +301,7 @@ mod tests {
             let client = Client::new(location, role_arn).await?;
             let (mut write, mut read) = client
                 .new_collection::<String, String, u64, i64>(NO_TIMEOUT, Id::new())
-                .await?;
+                .await??;
 
             let expected = vec![(("1".to_owned(), "one".to_owned()), 1, 1)];
             assert_eq!(write.upper(), &Antichain::from_elem(u64::minimum()));
@@ -310,7 +311,7 @@ mod tests {
                     expected.iter().map(|((k, v), t, d)| ((k, v), t, d)),
                     Antichain::from_elem(2),
                 )
-                .await?;
+                .await??;
             assert_eq!(write.upper(), &Antichain::from_elem(2));
 
             let mut snap = read
@@ -319,7 +320,7 @@ mod tests {
                     Antichain::from_elem(1),
                     NonZeroUsize::new(1).unwrap(),
                 )
-                .await?;
+                .await??;
             assert_eq!(snap.len(), 1);
             let snap = snap.pop().unwrap();
             let mut listen = read.listen(Antichain::from_elem(1)).await?;
@@ -327,8 +328,8 @@ mod tests {
             let mut snap = read.snapshot_part(NO_TIMEOUT, snap).await?.into_stream();
             let actual = {
                 let mut data = Vec::new();
-                while let Some(record) = snap.next().await {
-                    data.push(record)
+                while let Some(((k, v), t, d)) = snap.next().await {
+                    data.push(((k?, v?), t, d));
                 }
                 data
             };
@@ -336,7 +337,7 @@ mod tests {
 
             assert_eq!(read.since(), &Antichain::from_elem(u64::minimum()));
             read.downgrade_since(NO_TIMEOUT, Antichain::from_elem(2))
-                .await;
+                .await?;
             assert_eq!(read.since(), &Antichain::from_elem(2));
 
             let expected = vec![(("2".to_owned(), "two".to_owned()), 2, 1)];
@@ -346,10 +347,14 @@ mod tests {
                     expected.iter().map(|((k, v), t, d)| ((k, v), t, d)),
                     Antichain::from_elem(3),
                 )
-                .await?;
+                .await??;
             assert_eq!(write.upper(), &Antichain::from_elem(3));
 
-            let actual = listen.poll_next(NO_TIMEOUT).await;
+            let actual = listen.poll_next(NO_TIMEOUT).await?;
+            let actual = actual
+                .into_iter()
+                .map(|((k, v), t, d)| ((k.expect("WIP"), v.expect("WIP")), t, d))
+                .collect::<Vec<_>>();
             assert_eq!(actual, expected);
 
             Ok(())

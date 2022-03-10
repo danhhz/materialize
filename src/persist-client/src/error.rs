@@ -8,6 +8,17 @@
 // by the Apache License, Version 2.0.
 
 #[derive(Debug)]
+pub struct InvalidUsage(pub anyhow::Error);
+
+impl std::fmt::Display for InvalidUsage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid usage: {}", self.0)
+    }
+}
+
+impl std::error::Error for InvalidUsage {}
+
+#[derive(Debug)]
 pub struct Permanent {
     inner: anyhow::Error,
 }

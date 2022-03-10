@@ -22,6 +22,21 @@ use tracing::info;
 use crate::error::Error;
 use crate::gen::persist::ProtoMeta;
 
+/// WIP
+#[derive(Debug)]
+pub struct StorageError(
+    /// WIP
+    pub anyhow::Error,
+);
+
+impl fmt::Display for StorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "storage: {}", self.0)
+    }
+}
+
+impl std::error::Error for StorageError {}
+
 /// Sanity check whether we can decode the Blob's persisted meta object, and delete
 /// all data if the encoded version is less than what the current implementation supports.
 ///

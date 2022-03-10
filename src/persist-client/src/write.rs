@@ -17,14 +17,14 @@ use differential_dataflow::lattice::Lattice;
 use differential_dataflow::trace::Description;
 use mz_persist::indexed::columnar::ColumnarRecordsVecBuilder;
 use mz_persist::indexed::encoding::BlobTraceBatchPart;
-use mz_persist::storage::Atomicity;
+use mz_persist::storage::{Atomicity, StorageError};
 use mz_persist_types::{Codec, Codec64};
 use serde::{Deserialize, Serialize};
 use timely::progress::{Antichain, Timestamp};
 use tracing::{debug, trace};
 use uuid::Uuid;
 
-use crate::error::Permanent;
+use crate::error::InvalidUsage;
 use crate::machine::{Machine, WriteCapability};
 use crate::paths::Paths;
 
@@ -90,40 +90,45 @@ where
         timeout: Duration,
         updates: I,
         new_upper: Antichain<T>,
-    ) -> Result<(), Permanent> {
+    ) -> Result<Result<(), InvalidUsage>, StorageError> {
         let deadline = Instant::now() + timeout;
 
         let lower = self.cap.upper.clone();
         let since = Antichain::from_elem(T::minimum());
         let desc = Description::new(lower, new_upper, since);
 
-        // WIP verify lower vs upper
+        if self.upper() != desc.lower() {
+            return Ok(Err(InvalidUsage(anyhow!(
+                "batch lower didn't match handle upper"
+            ))));
+        }
 
         let key = Paths::pending_batch_key(&self.machine.collection.id, &self.writer_id, &desc);
         let mut value = Vec::new();
-        Self::encode_batch(&mut value, &desc, updates)?;
+        if let Err(err) = Self::encode_batch(&mut value, &desc, updates) {
+            return Ok(Err(err));
+        }
 
         debug!("writing batch {}", key);
         self.machine
             .collection
             .blob
             .set(deadline, &key, value, Atomicity::RequireAtomic)
-            .await
-            .expect("WIP retry loop");
+            .await?;
 
         self.machine
             .write_batch(deadline, &self.writer_id, &key, &desc)
-            .await
-            .expect("WIP");
+            .await?
+            .expect("internal error: write handle didn't correctly maintain upper");
         self.cap.upper = desc.upper().clone();
-        Ok(())
+        Ok(Ok(()))
     }
 
     fn encode_batch<'a, B, I>(
         buf: &mut B,
         desc: &Description<T>,
         updates: I,
-    ) -> Result<(), Permanent>
+    ) -> Result<(), InvalidUsage>
     where
         B: BufMut,
         I: IntoIterator<Item = ((&'a K, &'a V), &'a T, &'a D)>,
@@ -135,7 +140,7 @@ where
         let mut builder = ColumnarRecordsVecBuilder::default();
         for ((k, v), t, d) in iter {
             if !desc.lower().less_equal(&t) || desc.upper().less_equal(&t) {
-                return Err(Permanent::new(anyhow!(
+                return Err(InvalidUsage(anyhow!(
                     "entry timestamp {:?} doesn't fit in batch desc: {:?}",
                     t,
                     desc
@@ -201,11 +206,11 @@ impl<K, V, T, D> WriteHandle<K, V, T, D>
 where
     T: Timestamp + Lattice + Codec64,
 {
-    async fn deregister(&mut self, deadline: Instant) {
+    async fn deregister(&mut self, deadline: Instant) -> Result<(), StorageError> {
         self.machine
             .deregister_writer(deadline, &self.writer_id)
-            .await
-            .expect("WIP");
+            .await?;
+        Ok(())
     }
 }
 
@@ -215,6 +220,9 @@ where
     T: Timestamp + Lattice + Codec64,
 {
     fn drop(&mut self) {
-        futures_executor::block_on(self.deregister(Instant::now() + Duration::from_secs(1_000_000)))
+        futures_executor::block_on(
+            self.deregister(Instant::now() + Duration::from_secs(1_000_000)),
+        )
+        .expect("internal error: couldn't deregister write handle on drop");
     }
 }

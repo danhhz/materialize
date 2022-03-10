@@ -14,6 +14,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::anyhow;
 use async_trait::async_trait;
 use aws_config::default_provider::{credentials, region};
 use aws_config::meta::region::ProvideRegion;
@@ -35,7 +36,7 @@ use mz_aws_util::config::AwsConfig;
 use mz_ore::cast::CastFrom;
 
 use crate::error::Error;
-use crate::storage::{Atomicity, Blob, BlobRead, LockInfo};
+use crate::storage::{Atomicity, Blob, BlobRead, LockInfo, StorageError};
 
 /// Configuration for opening an [S3Blob] or [S3BlobRead].
 #[derive(Clone, Debug)]
@@ -767,8 +768,14 @@ impl S3BlobMultiWriter {
         &self,
         _deadline: Instant,
         key: &str,
-    ) -> Result<Option<Vec<u8>>, anyhow::Error> {
-        let value = self.blob.lock().await.get(key).await?;
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let value = self
+            .blob
+            .lock()
+            .await
+            .get(key)
+            .await
+            .map_err(|err| StorageError(anyhow!(err)))?;
         Ok(value)
     }
 
@@ -777,9 +784,15 @@ impl S3BlobMultiWriter {
         &self,
         _deadline: Instant,
         prefix: &str,
-    ) -> Result<Vec<String>, anyhow::Error> {
+    ) -> Result<Vec<String>, StorageError> {
         // WIP more efficient implementation to take advantage of the prefix
-        let keys = self.blob.lock().await.list_keys().await?;
+        let keys = self
+            .blob
+            .lock()
+            .await
+            .list_keys()
+            .await
+            .map_err(|err| StorageError(anyhow!(err)))?;
         let keys = keys.into_iter().filter(|x| x.starts_with(prefix)).collect();
         Ok(keys)
     }
@@ -791,14 +804,24 @@ impl S3BlobMultiWriter {
         key: &str,
         value: Vec<u8>,
         atomic: Atomicity,
-    ) -> Result<(), anyhow::Error> {
-        self.blob.lock().await.set(key, value, atomic).await?;
+    ) -> Result<(), StorageError> {
+        self.blob
+            .lock()
+            .await
+            .set(key, value, atomic)
+            .await
+            .map_err(|err| StorageError(anyhow!(err)))?;
         Ok(())
     }
 
     /// WIP
-    pub async fn delete(&self, _deadline: Instant, key: &str) -> Result<(), anyhow::Error> {
-        self.blob.lock().await.delete(key).await?;
+    pub async fn delete(&self, _deadline: Instant, key: &str) -> Result<(), StorageError> {
+        self.blob
+            .lock()
+            .await
+            .delete(key)
+            .await
+            .map_err(|err| StorageError(anyhow!(err)))?;
         Ok(())
     }
 }

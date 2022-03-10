@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use anyhow::anyhow;
 use mz_persist::s3::S3BlobMultiWriter;
-use mz_persist::storage::Atomicity;
+use mz_persist::storage::{Atomicity, StorageError};
 use uuid::Uuid;
 
 use crate::metadata::CollectionMeta;
@@ -34,7 +34,7 @@ impl Collection {
         &mut self,
         deadline: Instant,
         mut f: F,
-    ) -> Result<(Option<CollectionMeta>, CollectionMeta, SeqNo, R), anyhow::Error> {
+    ) -> Result<(Option<CollectionMeta>, CollectionMeta, SeqNo, R), StorageError> {
         loop {
             let (prev_seqno, prev_meta) = self.fetch_meta(deadline).await?;
             let (new_meta, ret) = f(prev_seqno, &prev_meta);
@@ -52,14 +52,14 @@ impl Collection {
     async fn fetch_current_meta_key(
         &self,
         deadline: Instant,
-    ) -> Result<(SeqNo, Option<String>), anyhow::Error> {
+    ) -> Result<(SeqNo, Option<String>), StorageError> {
         let (current, value) = self.log.current(deadline).await?;
         let value = match value {
             Some(x) => x,
             None => return Ok((current, None)),
         };
-        let value =
-            String::from_utf8(value).map_err(|err| anyhow!("invalid CURRENT_META: {}", err))?;
+        let value = String::from_utf8(value)
+            .map_err(|err| StorageError(anyhow!("invalid CURRENT_META: {}", err)))?;
         Ok((current, Some(value)))
     }
 
@@ -68,7 +68,7 @@ impl Collection {
     pub async fn fetch_meta(
         &self,
         deadline: Instant,
-    ) -> Result<(SeqNo, Option<CollectionMeta>), anyhow::Error> {
+    ) -> Result<(SeqNo, Option<CollectionMeta>), StorageError> {
         let (current, key) = self.fetch_current_meta_key(deadline).await?;
         let key = match key {
             Some(x) => x,
@@ -77,9 +77,9 @@ impl Collection {
         let value = self.blob.get(deadline, &key).await?;
         // NB: A missing current_meta_key means a new collection, but if we get
         // a key back and that key is missing, that's unexpected.
-        let value = value.ok_or(anyhow!("missing collection metadata"))?;
+        let value = value.expect("internal error: missing collection metadata");
         let meta: CollectionMeta = bincode::deserialize(value.as_slice())
-            .map_err(|err| anyhow!("corrupted collection metadata: {}", err))?;
+            .map_err(|err| StorageError(anyhow!("corrupted collection metadata: {}", err)))?;
         Ok((current, Some(meta)))
     }
 
@@ -88,10 +88,12 @@ impl Collection {
         deadline: Instant,
         expected: SeqNo,
         new: &CollectionMeta,
-    ) -> Result<Result<SeqNo, CompareAndSet>, anyhow::Error> {
+    ) -> Result<Result<SeqNo, CompareAndSet>, StorageError> {
         let key = Paths::version_key(&self.id, Uuid::new_v4());
-        let value = bincode::serialize(&new)
-            .map_err(|err| anyhow!("encoding collection metadata: {}", err))?;
+        // See https://github.com/bincode-org/bincode/issues/293 for why this is
+        // infallible.
+        let value =
+            bincode::serialize(&new).expect("internal error: serialization of CollectionMeta");
         self.blob
             .set(deadline, &key, value, Atomicity::RequireAtomic)
             .await?;

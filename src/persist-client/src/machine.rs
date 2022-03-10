@@ -14,11 +14,13 @@ use std::time::Instant;
 use anyhow::anyhow;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::trace::Description;
+use mz_persist::storage::StorageError;
 use mz_persist_types::Codec64;
 use timely::progress::{Antichain, Timestamp};
 use timely::PartialOrder;
 
 use crate::collection::Collection;
+use crate::error::InvalidUsage;
 use crate::metadata::{CollectionMeta, ReaderMeta, TraceBatchMeta, WriterMeta};
 use crate::read::ReaderId;
 use crate::write::WriterId;
@@ -150,7 +152,7 @@ impl<T: Timestamp + Lattice + Codec64> State<T> {
         }
     }
 
-    fn since(&self) -> Antichain<T> {
+    pub fn since(&self) -> Antichain<T> {
         //  WIP double check this initial and the meet_assign
         //
         // WIP what happens if all readers go away and then some come back?
@@ -161,7 +163,7 @@ impl<T: Timestamp + Lattice + Codec64> State<T> {
         ret
     }
 
-    fn upper(&self) -> Antichain<T> {
+    pub fn upper(&self) -> Antichain<T> {
         // WIP double check this initial and the join_assign
         //
         // WIP what happens if all writers go away and then some come back?
@@ -172,7 +174,7 @@ impl<T: Timestamp + Lattice + Codec64> State<T> {
         ret
     }
 
-    fn seqno_since(&self) -> SeqNo {
+    pub fn seqno_since(&self) -> SeqNo {
         let mut ret = None;
         // WIP what happens if all writers go away and then some come back?
         for (_, cap) in self.readers.iter() {
@@ -206,7 +208,7 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
         deadline: Instant,
         writer_id: &WriterId,
         reader_id: &ReaderId,
-    ) -> (WriteCapability<T>, ReadCapability<T>) {
+    ) -> Result<(WriteCapability<T>, ReadCapability<T>), StorageError> {
         let (seqno, (write_cap, read_cap)) = self
             .apply_unbatched_cmd(deadline, |seqno, state| {
                 let write_cap = WriteCapability {
@@ -221,10 +223,10 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
                 state.readers.insert(reader_id.clone(), read_cap.clone());
                 (write_cap, read_cap)
             })
-            .await;
+            .await?;
         debug_assert_eq!(seqno, write_cap.seqno);
         debug_assert_eq!(seqno, read_cap.seqno);
-        (write_cap, read_cap)
+        Ok((write_cap, read_cap))
     }
 
     pub async fn write_batch(
@@ -233,24 +235,27 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
         writer_id: &WriterId,
         key: &str,
         desc: &Description<T>,
-    ) -> Result<SeqNo, anyhow::Error> {
+    ) -> Result<Result<SeqNo, InvalidUsage>, StorageError> {
         let (seqno, res) = self
             .apply_unbatched_cmd(deadline, |_, state| {
                 let write_cap = state
                     .writers
                     .get_mut(writer_id)
-                    .expect("writer not registered");
+                    // WIP this is more likely that the lease expired
+                    .ok_or_else(|| InvalidUsage(anyhow!("writer not registered")))?;
                 if &write_cap.upper != desc.lower() {
-                    return Err(anyhow!("WIP"));
+                    return Err(InvalidUsage(anyhow!("WIP")));
                 }
                 write_cap.upper.clone_from(desc.upper());
                 // WIP have to trim desc
                 state.trace.push((key.to_owned(), desc.clone()));
                 Ok(())
             })
-            .await;
-        let _: () = res?;
-        Ok(seqno)
+            .await?;
+        if let Err(err) = res {
+            return Ok(Err(err));
+        }
+        Ok(Ok(seqno))
     }
 
     pub async fn downgrade_since(
@@ -258,35 +263,38 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
         deadline: Instant,
         reader_id: &ReaderId,
         new_since: &Antichain<T>,
-    ) -> Result<SeqNo, anyhow::Error> {
+    ) -> Result<Result<SeqNo, InvalidUsage>, StorageError> {
         let (seqno, res) = self
             .apply_unbatched_cmd(deadline, |_, state| {
                 let read_cap = state
                     .readers
                     .get_mut(reader_id)
-                    .expect("reader not registered");
+                    // WIP this is more likely that the lease expired
+                    .ok_or_else(|| InvalidUsage(anyhow!("reader not registered")))?;
                 if !PartialOrder::less_equal(&read_cap.since, new_since) {
-                    return Err(anyhow!("WIP"));
+                    return Err(InvalidUsage(anyhow!("WIP")));
                 }
                 read_cap.since.clone_from(new_since);
                 Ok(())
             })
-            .await;
-        let _: () = res?;
-        self.maybe_compact_log(deadline).await;
-        Ok(seqno)
+            .await?;
+        if let Err(err) = res {
+            return Ok(Err(err));
+        }
+        self.maybe_compact_log(deadline).await?;
+        Ok(Ok(seqno))
     }
 
     pub async fn deregister_writer(
         &mut self,
         deadline: Instant,
         writer_id: &WriterId,
-    ) -> Result<SeqNo, anyhow::Error> {
+    ) -> Result<SeqNo, StorageError> {
         let (seqno, ()) = self
             .apply_unbatched_cmd(deadline, |_, state| {
                 state.writers.remove(writer_id);
             })
-            .await;
+            .await?;
         Ok(seqno)
     }
 
@@ -294,13 +302,13 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
         &mut self,
         deadline: Instant,
         reader_id: &ReaderId,
-    ) -> Result<SeqNo, anyhow::Error> {
+    ) -> Result<SeqNo, StorageError> {
         let (seqno, ()) = self
             .apply_unbatched_cmd(deadline, |_, state| {
                 state.readers.remove(reader_id);
             })
-            .await;
-        self.maybe_compact_log(deadline).await;
+            .await?;
+        self.maybe_compact_log(deadline).await?;
         Ok(seqno)
     }
 
@@ -308,10 +316,10 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
         &mut self,
         deadline: Instant,
         res: CompactTraceRes<T>,
-    ) -> Result<SeqNo, anyhow::Error> {
+    ) -> Result<SeqNo, StorageError> {
         let (seqno, ()) = self
             .apply_unbatched_cmd(deadline, |_, state| todo!("{:?} {:?}", state, res))
-            .await;
+            .await?;
         Ok(seqno)
     }
 
@@ -319,7 +327,7 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
         &mut self,
         deadline: Instant,
         mut work_fn: WorkFn,
-    ) -> (SeqNo, R) {
+    ) -> Result<(SeqNo, R), StorageError> {
         let (_, _, seqno, ret) = self
             .collection
             .update_metadata(deadline, |durable_seqno, durable_state| {
@@ -332,21 +340,20 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
                 let new_state = self.state.to_meta();
                 (new_state, ret)
             })
-            .await
-            .expect("WIP");
-        (seqno, ret)
+            .await?;
+        Ok((seqno, ret))
     }
 
-    async fn maybe_compact_log(&mut self, deadline: Instant) {
+    async fn maybe_compact_log(&mut self, deadline: Instant) -> Result<(), StorageError> {
         // TODO: GC old blobs here instead of leaking them.
         self.collection
             .log
             .compact(deadline, self.state.seqno_since())
-            .await
-            .expect("WIP");
+            .await?;
+        Ok(())
     }
 
-    async fn maybe_compact_trace(&mut self, deadline: Instant) {
+    async fn maybe_compact_trace(&mut self, deadline: Instant) -> Result<(), StorageError> {
         let mut batches = self.state.trace.iter();
         // WIP not the compaction algorithm that we'll use
         let req = match (batches.next(), batches.next()) {
@@ -355,7 +362,7 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
                 b1: b1.clone(),
                 since: self.state.since(),
             },
-            _ => return,
+            _ => return Ok(()),
         };
         // WIP actually write out the batch.
         let merged = Description::new(
@@ -367,9 +374,8 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
             req,
             merged: ("WIP".into(), merged),
         };
-        self.handle_compact_trace_res(deadline, res)
-            .await
-            .expect("WIP");
+        self.handle_compact_trace_res(deadline, res).await?;
+        Ok(())
     }
 }
 
