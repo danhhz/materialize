@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::metadata::CollectionMeta;
 use crate::paths::Paths;
-use crate::{Id, Log, MemLog, SeqNo};
+use crate::{CompareAndSet, Id, Log, MemLog, SeqNo};
 
 #[derive(Debug, Clone)]
 pub struct Collection {
@@ -35,16 +35,17 @@ impl Collection {
         deadline: Instant,
         mut f: F,
     ) -> Result<(Option<CollectionMeta>, CollectionMeta, SeqNo, R), anyhow::Error> {
-        let (prev_seqno, mut prev_meta) = self.fetch_meta(deadline).await?;
         loop {
+            let (prev_seqno, prev_meta) = self.fetch_meta(deadline).await?;
             let (new_meta, ret) = f(prev_seqno, &prev_meta);
-            // TODO: Retry on failure.
-            let (seqno, durable_meta) = self.cas_meta(deadline, &prev_meta, &new_meta).await?;
-            if durable_meta.as_ref() == Some(&new_meta) {
-                return Ok((prev_meta.clone(), new_meta, seqno, ret));
-            }
-            // We lost a race, try again.
-            prev_meta = durable_meta;
+            let seqno = match self.cas_meta(deadline, prev_seqno, &new_meta).await? {
+                Ok(x) => x,
+                Err(CompareAndSet { .. }) => {
+                    // We lost a race, try again.
+                    continue;
+                }
+            };
+            return Ok((prev_meta, new_meta, seqno, ret));
         }
     }
 
@@ -85,18 +86,9 @@ impl Collection {
     async fn cas_meta(
         &self,
         deadline: Instant,
-        expected: &Option<CollectionMeta>,
+        expected: SeqNo,
         new: &CollectionMeta,
-    ) -> Result<(SeqNo, Option<CollectionMeta>), anyhow::Error> {
-        // WIP this is an entirely incorrect implementation of compare and set.
-        // we'll actually want to use something like etcd
-        let (current, durable) = self.fetch_meta(deadline).await?;
-        if &durable != expected {
-            // WIP is current the right thing to return here or should we push
-            // SeqNo inside the Option?
-            return Ok((current, durable));
-        }
-
+    ) -> Result<Result<SeqNo, CompareAndSet>, anyhow::Error> {
         let key = Paths::version_key(&self.id, Uuid::new_v4());
         let value = bincode::serialize(&new)
             .map_err(|err| anyhow!("encoding collection metadata: {}", err))?;
@@ -106,9 +98,13 @@ impl Collection {
 
         let seqno = self
             .log
-            .compare_and_set(deadline, current, Some(key.into_bytes()))
+            .compare_and_set(deadline, expected, Some(key.into_bytes()))
             .await?;
+        let seqno = match seqno {
+            Ok(x) => x,
+            Err(CompareAndSet { current }) => return Ok(Err(CompareAndSet { current })),
+        };
 
-        Ok((seqno, Some(new.clone())))
+        Ok(Ok(seqno))
     }
 }

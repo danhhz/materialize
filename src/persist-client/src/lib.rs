@@ -28,7 +28,7 @@ use tracing::trace;
 use uuid::Uuid;
 
 use crate::collection::Collection;
-use crate::error::{Permanent, StorageError};
+use crate::error::Permanent;
 use crate::machine::Machine;
 use crate::read::{ReadHandle, ReaderId};
 use crate::write::{WriteHandle, WriterId};
@@ -183,7 +183,7 @@ impl Client {
         let collection = Collection {
             id,
             blob: self.blob.clone(),
-            log: self.log.clone(),
+            log: Arc::clone(&self.log),
         };
         let mut machine = Machine::new(collection);
 
@@ -211,18 +211,22 @@ impl Client {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SeqNo(u64);
 
+pub struct CompareAndSet {
+    pub current: SeqNo,
+}
+
 #[async_trait]
 pub trait Log: std::fmt::Debug + Send + 'static {
-    async fn current(&self, deadline: Instant) -> Result<(SeqNo, Option<Vec<u8>>), StorageError>;
+    async fn current(&self, deadline: Instant) -> Result<(SeqNo, Option<Vec<u8>>), anyhow::Error>;
 
     async fn compare_and_set(
         &self,
         deadline: Instant,
         expected: SeqNo,
         value: Option<Vec<u8>>,
-    ) -> Result<SeqNo, StorageError>;
+    ) -> Result<Result<SeqNo, CompareAndSet>, anyhow::Error>;
 
-    async fn compact(&self, deadline: Instant, since: SeqNo) -> Result<(), StorageError>;
+    async fn compact(&self, deadline: Instant, since: SeqNo) -> Result<(), anyhow::Error>;
 }
 
 #[derive(Debug, Default)]
@@ -232,7 +236,7 @@ pub struct MemLog {
 
 #[async_trait]
 impl Log for MemLog {
-    async fn current(&self, _deadline: Instant) -> Result<(SeqNo, Option<Vec<u8>>), StorageError> {
+    async fn current(&self, _deadline: Instant) -> Result<(SeqNo, Option<Vec<u8>>), anyhow::Error> {
         let current = self
             .entries
             .lock()
@@ -248,18 +252,18 @@ impl Log for MemLog {
         deadline: Instant,
         expected: SeqNo,
         value: Option<Vec<u8>>,
-    ) -> Result<SeqNo, StorageError> {
+    ) -> Result<Result<SeqNo, CompareAndSet>, anyhow::Error> {
         let (current, _) = self.current(deadline).await?;
         if current != expected {
-            return Err("expected didn't match".into());
+            return Ok(Err(CompareAndSet { current }));
         }
         let next = SeqNo(current.0 + 1);
         self.entries.lock().await.push((next, value));
         trace!("Log::compare_and_set {:?}", self.entries);
-        Ok(next)
+        Ok(Ok(next))
     }
 
-    async fn compact(&self, _deadline: Instant, _since: SeqNo) -> Result<(), StorageError> {
+    async fn compact(&self, _deadline: Instant, _since: SeqNo) -> Result<(), anyhow::Error> {
         // WIP no-op
         Ok(())
     }

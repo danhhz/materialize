@@ -132,7 +132,7 @@ where
             .get(deadline, &key)
             .await
             .expect("WIP retry loop")
-            .ok_or(Permanent::new(anyhow!("internal error: missing batch")))?;
+            .ok_or_else(|| Permanent::new(anyhow!("internal error: missing batch")))?;
         let batch =
             BlobTraceBatchPart::decode(&value).map_err(|err| Permanent::new(anyhow!(err)))?;
         let mut updates = Vec::new();
@@ -329,7 +329,7 @@ where
                 .get(deadline, &key)
                 .await
                 .expect("WIP retry loop")
-                .ok_or(Permanent::new(anyhow!("internal error: missing batch")))?;
+                .ok_or_else(|| Permanent::new(anyhow!("internal error: missing batch")))?;
             let batch =
                 BlobTraceBatchPart::decode(&value).map_err(|err| Permanent::new(anyhow!(err)))?;
             for chunk in batch.updates {

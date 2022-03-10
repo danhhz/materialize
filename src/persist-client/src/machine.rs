@@ -176,7 +176,7 @@ impl<T: Timestamp + Lattice + Codec64> State<T> {
         let mut ret = None;
         // WIP what happens if all writers go away and then some come back?
         for (_, cap) in self.readers.iter() {
-            let prev = ret.get_or_insert_with(|| cap.seqno);
+            let prev = ret.get_or_insert(cap.seqno);
             *prev = cmp::min(*prev, cap.seqno);
         }
         ret.unwrap_or_default()

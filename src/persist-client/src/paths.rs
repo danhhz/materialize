@@ -110,15 +110,15 @@ impl Paths {
         assert!(parts.next().is_none());
 
         let lower = lower
-            .split("-")
+            .split('-')
             .map(|x| T::decode(x.parse::<u64>().expect("WIP").to_le_bytes()))
             .collect::<Vec<_>>();
         let upper = upper
-            .split("-")
+            .split('-')
             .map(|x| T::decode(x.parse::<u64>().expect("WIP").to_le_bytes()))
             .collect::<Vec<_>>();
         let since = since
-            .split("-")
+            .split('-')
             .map(|x| T::decode(x.parse::<u64>().expect("WIP").to_le_bytes()))
             .collect::<Vec<_>>();
 
