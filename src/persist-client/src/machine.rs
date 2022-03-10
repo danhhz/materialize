@@ -9,6 +9,7 @@
 
 use std::cmp;
 use std::collections::HashMap;
+use std::time::Instant;
 
 use anyhow::anyhow;
 use differential_dataflow::lattice::Lattice;
@@ -18,7 +19,7 @@ use timely::progress::{Antichain, Timestamp};
 use timely::PartialOrder;
 
 use crate::collection::Collection;
-use crate::metadata::{CollectionMeta, TraceBatchMeta};
+use crate::metadata::{CollectionMeta, ReaderMeta, TraceBatchMeta, WriterMeta};
 use crate::read::ReaderId;
 use crate::write::WriterId;
 use crate::{Log, SeqNo};
@@ -61,10 +62,10 @@ impl<T: Timestamp + Lattice + Codec64> State<T> {
         let writers = state
             .writers
             .iter()
-            .map(|(id, seqno, upper)| {
-                let upper = upper.iter().map(|x| T::decode(*x)).collect::<Vec<_>>();
+            .map(|(id, meta)| {
+                let upper = meta.upper.iter().map(|x| T::decode(*x)).collect::<Vec<_>>();
                 let cap = WriteCapability {
-                    seqno: *seqno,
+                    seqno: meta.seqno,
                     upper: Antichain::from(upper),
                 };
                 (id.clone(), cap)
@@ -73,10 +74,10 @@ impl<T: Timestamp + Lattice + Codec64> State<T> {
         let readers = state
             .readers
             .iter()
-            .map(|(id, seqno, since)| {
-                let since = since.iter().map(|x| T::decode(*x)).collect::<Vec<_>>();
+            .map(|(id, meta)| {
+                let since = meta.since.iter().map(|x| T::decode(*x)).collect::<Vec<_>>();
                 let cap = ReadCapability {
-                    seqno: *seqno,
+                    seqno: meta.seqno,
                     since: Antichain::from(since),
                 };
                 (id.clone(), cap)
@@ -111,7 +112,11 @@ impl<T: Timestamp + Lattice + Codec64> State<T> {
                 .iter()
                 .map(|(id, cap)| {
                     let upper = cap.upper.elements().iter().map(|x| T::encode(x)).collect();
-                    (id.clone(), cap.seqno, upper)
+                    let meta = WriterMeta {
+                        seqno: cap.seqno,
+                        upper,
+                    };
+                    (id.clone(), meta)
                 })
                 .collect(),
             readers: self
@@ -119,7 +124,11 @@ impl<T: Timestamp + Lattice + Codec64> State<T> {
                 .iter()
                 .map(|(id, cap)| {
                     let since = cap.since.elements().iter().map(|x| T::encode(x)).collect();
-                    (id.clone(), cap.seqno, since)
+                    let meta = ReaderMeta {
+                        seqno: cap.seqno,
+                        since,
+                    };
+                    (id.clone(), meta)
                 })
                 .collect(),
             trace: self
@@ -194,11 +203,12 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
 
     pub async fn register(
         &mut self,
+        deadline: Instant,
         writer_id: &WriterId,
         reader_id: &ReaderId,
     ) -> (WriteCapability<T>, ReadCapability<T>) {
         let (seqno, (write_cap, read_cap)) = self
-            .apply_unbatched_cmd(|seqno, state| {
+            .apply_unbatched_cmd(deadline, |seqno, state| {
                 let write_cap = WriteCapability {
                     seqno,
                     upper: state.upper(),
@@ -219,12 +229,13 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
 
     pub async fn write_batch(
         &mut self,
+        deadline: Instant,
         writer_id: &WriterId,
         key: &str,
         desc: &Description<T>,
     ) -> Result<SeqNo, anyhow::Error> {
         let (seqno, res) = self
-            .apply_unbatched_cmd(|_, state| {
+            .apply_unbatched_cmd(deadline, |_, state| {
                 let write_cap = state
                     .writers
                     .get_mut(writer_id)
@@ -244,11 +255,12 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
 
     pub async fn downgrade_since(
         &mut self,
+        deadline: Instant,
         reader_id: &ReaderId,
         new_since: &Antichain<T>,
     ) -> Result<SeqNo, anyhow::Error> {
         let (seqno, res) = self
-            .apply_unbatched_cmd(|_, state| {
+            .apply_unbatched_cmd(deadline, |_, state| {
                 let read_cap = state
                     .readers
                     .get_mut(reader_id)
@@ -261,16 +273,17 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
             })
             .await;
         let _: () = res?;
-        self.maybe_compact_log().await;
+        self.maybe_compact_log(deadline).await;
         Ok(seqno)
     }
 
     pub async fn deregister_writer(
         &mut self,
+        deadline: Instant,
         writer_id: &WriterId,
     ) -> Result<SeqNo, anyhow::Error> {
         let (seqno, ()) = self
-            .apply_unbatched_cmd(|_, state| {
+            .apply_unbatched_cmd(deadline, |_, state| {
                 state.writers.remove(writer_id);
             })
             .await;
@@ -279,34 +292,37 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
 
     pub async fn deregister_reader(
         &mut self,
+        deadline: Instant,
         reader_id: &ReaderId,
     ) -> Result<SeqNo, anyhow::Error> {
         let (seqno, ()) = self
-            .apply_unbatched_cmd(|_, state| {
+            .apply_unbatched_cmd(deadline, |_, state| {
                 state.readers.remove(reader_id);
             })
             .await;
-        self.maybe_compact_log().await;
+        self.maybe_compact_log(deadline).await;
         Ok(seqno)
     }
 
     pub async fn handle_compact_trace_res(
         &mut self,
+        deadline: Instant,
         res: CompactTraceRes<T>,
     ) -> Result<SeqNo, anyhow::Error> {
         let (seqno, ()) = self
-            .apply_unbatched_cmd(|_, state| todo!("{:?} {:?}", state, res))
+            .apply_unbatched_cmd(deadline, |_, state| todo!("{:?} {:?}", state, res))
             .await;
         Ok(seqno)
     }
 
     async fn apply_unbatched_cmd<R, WorkFn: FnMut(SeqNo, &mut State<T>) -> R>(
         &mut self,
+        deadline: Instant,
         mut work_fn: WorkFn,
     ) -> (SeqNo, R) {
         let (_, _, seqno, ret) = self
             .collection
-            .update_metadata(|durable_seqno, durable_state| {
+            .update_metadata(deadline, |durable_seqno, durable_state| {
                 if self.seqno != durable_seqno {
                     self.seqno = durable_seqno;
                     self.state = State::from_meta(durable_state.as_ref());
@@ -321,16 +337,16 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
         (seqno, ret)
     }
 
-    async fn maybe_compact_log(&mut self) {
+    async fn maybe_compact_log(&mut self, deadline: Instant) {
         // TODO: GC old blobs here instead of leaking them.
         self.collection
             .log
-            .compact(self.state.seqno_since())
+            .compact(deadline, self.state.seqno_since())
             .await
             .expect("WIP");
     }
 
-    async fn maybe_compact_trace(&mut self) {
+    async fn maybe_compact_trace(&mut self, deadline: Instant) {
         let mut batches = self.state.trace.iter();
         // WIP not the compaction algorithm that we'll use
         let req = match (batches.next(), batches.next()) {
@@ -351,7 +367,9 @@ impl<T: Timestamp + Lattice + Codec64> Machine<T> {
             req,
             merged: ("WIP".into(), merged),
         };
-        self.handle_compact_trace_res(res).await.expect("WIP");
+        self.handle_compact_trace_res(deadline, res)
+            .await
+            .expect("WIP");
     }
 }
 

@@ -13,6 +13,7 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -139,6 +140,7 @@ impl Client {
     /// It is an error to re-use a previously used `id`.
     pub async fn new_collection<K, V, T, D>(
         &self,
+        timeout: Duration,
         id: Id,
     ) -> Result<(WriteHandle<K, V, T, D>, ReadHandle<K, V, T, D>), Permanent>
     where
@@ -147,7 +149,7 @@ impl Client {
         T: Timestamp + Lattice + Codec64,
         D: Semigroup + Codec64,
     {
-        let (write, read) = self.open_collection(id).await?;
+        let (write, read) = self.open_collection(timeout, id).await?;
         if read.since() != &Antichain::from_elem(T::minimum()) {
             return Err(Permanent::new(anyhow!("id already exists")));
         }
@@ -167,6 +169,7 @@ impl Client {
     /// capabilities with empty frontiers (which are useless).
     pub async fn open_collection<K, V, T, D>(
         &self,
+        timeout: Duration,
         id: Id,
     ) -> Result<(WriteHandle<K, V, T, D>, ReadHandle<K, V, T, D>), Permanent>
     where
@@ -175,6 +178,8 @@ impl Client {
         T: Timestamp + Lattice + Codec64,
         D: Semigroup + Codec64,
     {
+        let deadline = Instant::now() + timeout;
+
         let collection = Collection {
             id,
             blob: self.blob.clone(),
@@ -184,7 +189,7 @@ impl Client {
 
         let writer_id = WriterId(Uuid::new_v4().as_bytes().to_owned());
         let reader_id = ReaderId(Uuid::new_v4().as_bytes().to_owned());
-        let (write_cap, read_cap) = machine.register(&writer_id, &reader_id).await;
+        let (write_cap, read_cap) = machine.register(deadline, &writer_id, &reader_id).await;
 
         let write = WriteHandle {
             machine: machine.clone(),
@@ -208,15 +213,16 @@ pub struct SeqNo(u64);
 
 #[async_trait]
 pub trait Log: std::fmt::Debug + Send + 'static {
-    async fn current(&self) -> Result<(SeqNo, Option<Vec<u8>>), StorageError>;
+    async fn current(&self, deadline: Instant) -> Result<(SeqNo, Option<Vec<u8>>), StorageError>;
 
     async fn compare_and_set(
         &self,
+        deadline: Instant,
         expected: SeqNo,
         value: Option<Vec<u8>>,
     ) -> Result<SeqNo, StorageError>;
 
-    async fn compact(&self, since: SeqNo) -> Result<(), StorageError>;
+    async fn compact(&self, deadline: Instant, since: SeqNo) -> Result<(), StorageError>;
 }
 
 #[derive(Debug, Default)]
@@ -226,7 +232,7 @@ pub struct MemLog {
 
 #[async_trait]
 impl Log for MemLog {
-    async fn current(&self) -> Result<(SeqNo, Option<Vec<u8>>), StorageError> {
+    async fn current(&self, _deadline: Instant) -> Result<(SeqNo, Option<Vec<u8>>), StorageError> {
         let current = self
             .entries
             .lock()
@@ -239,10 +245,11 @@ impl Log for MemLog {
 
     async fn compare_and_set(
         &self,
+        deadline: Instant,
         expected: SeqNo,
         value: Option<Vec<u8>>,
     ) -> Result<SeqNo, StorageError> {
-        let (current, _) = self.current().await?;
+        let (current, _) = self.current(deadline).await?;
         if current != expected {
             return Err("expected didn't match".into());
         }
@@ -252,7 +259,7 @@ impl Log for MemLog {
         Ok(next)
     }
 
-    async fn compact(&self, _since: SeqNo) -> Result<(), StorageError> {
+    async fn compact(&self, _deadline: Instant, _since: SeqNo) -> Result<(), StorageError> {
         // WIP no-op
         Ok(())
     }
@@ -261,12 +268,15 @@ impl Log for MemLog {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroUsize;
+    use std::time::Duration;
 
     use futures_util::StreamExt;
     use mz_persist::s3::S3BlobConfig;
     use tokio::runtime::Runtime;
 
     use super::*;
+
+    const NO_TIMEOUT: Duration = Duration::from_secs(1_000_000);
 
     #[test]
     fn sanity_check() -> Result<(), Box<dyn std::error::Error>> {
@@ -285,13 +295,14 @@ mod tests {
             };
             let client = Client::new(location, role_arn).await?;
             let (mut write, mut read) = client
-                .new_collection::<String, String, u64, i64>(Id::new())
+                .new_collection::<String, String, u64, i64>(NO_TIMEOUT, Id::new())
                 .await?;
 
             let expected = vec![(("1".to_owned(), "one".to_owned()), 1, 1)];
             assert_eq!(write.upper(), &Antichain::from_elem(u64::minimum()));
             write
                 .write_batch(
+                    NO_TIMEOUT,
                     expected.iter().map(|((k, v), t, d)| ((k, v), t, d)),
                     Antichain::from_elem(2),
                 )
@@ -299,13 +310,17 @@ mod tests {
             assert_eq!(write.upper(), &Antichain::from_elem(2));
 
             let mut snap = read
-                .snapshot(Antichain::from_elem(1), NonZeroUsize::new(1).unwrap())
+                .snapshot(
+                    NO_TIMEOUT,
+                    Antichain::from_elem(1),
+                    NonZeroUsize::new(1).unwrap(),
+                )
                 .await?;
             assert_eq!(snap.len(), 1);
             let snap = snap.pop().unwrap();
             let mut listen = read.listen(Antichain::from_elem(1)).await?;
 
-            let mut snap = read.snapshot_part(snap).await?.into_stream();
+            let mut snap = read.snapshot_part(NO_TIMEOUT, snap).await?.into_stream();
             let actual = {
                 let mut data = Vec::new();
                 while let Some(record) = snap.next().await {
@@ -316,19 +331,21 @@ mod tests {
             assert_eq!(actual, expected);
 
             assert_eq!(read.since(), &Antichain::from_elem(u64::minimum()));
-            read.downgrade_since(Antichain::from_elem(2)).await;
+            read.downgrade_since(NO_TIMEOUT, Antichain::from_elem(2))
+                .await;
             assert_eq!(read.since(), &Antichain::from_elem(2));
 
             let expected = vec![(("2".to_owned(), "two".to_owned()), 2, 1)];
             write
                 .write_batch(
+                    NO_TIMEOUT,
                     expected.iter().map(|((k, v), t, d)| ((k, v), t, d)),
                     Antichain::from_elem(3),
                 )
                 .await?;
             assert_eq!(write.upper(), &Antichain::from_elem(3));
 
-            let actual = listen.poll_next().await;
+            let actual = listen.poll_next(NO_TIMEOUT).await;
             assert_eq!(actual, expected);
 
             Ok(())

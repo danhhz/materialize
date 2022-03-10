@@ -9,7 +9,7 @@
 
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use differential_dataflow::difference::Semigroup;
@@ -90,9 +90,10 @@ where
     D: Semigroup + Codec64,
 {
     // WIP: We also need a way to delivery progress information from this.
-    pub async fn poll_next(&mut self) -> Vec<((K, V), T, D)> {
+    pub async fn poll_next(&mut self, timeout: Duration) -> Vec<((K, V), T, D)> {
+        let deadline = Instant::now() + timeout;
         loop {
-            let (_, meta) = self.collection.fetch_meta().await.expect("WIP");
+            let (_, meta) = self.collection.fetch_meta(deadline).await.expect("WIP");
             let state = State::from_meta(meta.as_ref());
 
             let all_batch_descs = state.trace.clone();
@@ -104,7 +105,7 @@ where
                     continue;
                 } else if PartialOrder::less_equal(desc.lower(), &self.frontier) {
                     trace!("listen emitting {:?}", desc);
-                    let updates = self.fetch_batch_updates(&key).await.expect("WIP");
+                    let updates = self.fetch_batch_updates(deadline, &key).await.expect("WIP");
                     self.frontier = desc.upper().clone();
                     if updates.is_empty() {
                         continue;
@@ -120,11 +121,15 @@ where
         }
     }
 
-    async fn fetch_batch_updates(&self, key: &str) -> Result<Vec<((K, V), T, D)>, Permanent> {
+    async fn fetch_batch_updates(
+        &self,
+        deadline: Instant,
+        key: &str,
+    ) -> Result<Vec<((K, V), T, D)>, Permanent> {
         let value = self
             .collection
             .blob
-            .get(&key)
+            .get(deadline, &key)
             .await
             .expect("WIP retry loop")
             .ok_or(Permanent::new(anyhow!("internal error: missing batch")))?;
@@ -197,12 +202,13 @@ where
     /// promising that no more data will ever be read by this handle.
     //
     // WIP AntichainRef?
-    pub async fn downgrade_since(&mut self, new_since: Antichain<T>) {
+    pub async fn downgrade_since(&mut self, timeout: Duration, new_since: Antichain<T>) {
+        let deadline = Instant::now() + timeout;
         // WIP note that this is allowed to run ahead of the state's view of it,
         // but not vice-versa. otherwise GC is hard to reason about
         self.cap.since = new_since;
         self.machine
-            .downgrade_since(&self.reader_id, &self.cap.since)
+            .downgrade_since(deadline, &self.reader_id, &self.cap.since)
             .await
             .expect("WIP");
     }
@@ -251,10 +257,17 @@ where
     // STORAGE-level concerns.
     pub async fn snapshot(
         &self,
+        timeout: Duration,
         as_of: Antichain<T>,
         num_parts: NonZeroUsize,
     ) -> Result<Vec<SnapshotPart>, Permanent> {
-        let (_, meta) = self.machine.collection.fetch_meta().await.expect("WIP");
+        let deadline = Instant::now() + timeout;
+        let (_, meta) = self
+            .machine
+            .collection
+            .fetch_meta(deadline)
+            .await
+            .expect("WIP");
         let state = State::from_meta(meta.as_ref());
         let all_batch_descs = BatchDescs(state.trace);
         debug!("all_batch_descs {:?}", all_batch_descs);
@@ -288,8 +301,10 @@ where
     // compile with `todo!`. I don't yet have an opinion on which is better.
     pub async fn snapshot_part(
         &self,
+        timeout: Duration,
         part: SnapshotPart,
     ) -> Result<SnapshotIter<K, V, T, D>, Permanent> {
+        let deadline = Instant::now() + timeout;
         let upper = Antichain::from(
             part.upper
                 .into_iter()
@@ -311,7 +326,7 @@ where
                 .machine
                 .collection
                 .blob
-                .get(&key)
+                .get(deadline, &key)
                 .await
                 .expect("WIP retry loop")
                 .ok_or(Permanent::new(anyhow!("internal error: missing batch")))?;
@@ -344,9 +359,9 @@ impl<K, V, T, D> ReadHandle<K, V, T, D>
 where
     T: Timestamp + Lattice + Codec64,
 {
-    async fn deregister(&mut self) {
+    async fn deregister(&mut self, deadline: Instant) {
         self.machine
-            .deregister_reader(&self.reader_id)
+            .deregister_reader(deadline, &self.reader_id)
             .await
             .expect("WIP");
     }
@@ -357,6 +372,6 @@ where
     T: Timestamp + Lattice + Codec64,
 {
     fn drop(&mut self) {
-        futures_executor::block_on(self.deregister())
+        futures_executor::block_on(self.deregister(Instant::now() + Duration::from_secs(1_000_000)))
     }
 }

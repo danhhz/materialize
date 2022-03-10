@@ -8,6 +8,7 @@
 // by the Apache License, Version 2.0.
 
 use std::marker::PhantomData;
+use std::time::{Duration, Instant};
 
 use anyhow::anyhow;
 use bytes::BufMut;
@@ -86,9 +87,12 @@ where
     /// (in the sense of "definite"-ness).
     pub async fn write_batch<'a, I: IntoIterator<Item = ((&'a K, &'a V), &'a T, &'a D)>>(
         &mut self,
+        timeout: Duration,
         updates: I,
         new_upper: Antichain<T>,
     ) -> Result<(), Permanent> {
+        let deadline = Instant::now() + timeout;
+
         let lower = self.cap.upper.clone();
         let since = Antichain::from_elem(T::minimum());
         let desc = Description::new(lower, new_upper, since);
@@ -103,12 +107,12 @@ where
         self.machine
             .collection
             .blob
-            .set(&key, value, Atomicity::RequireAtomic)
+            .set(deadline, &key, value, Atomicity::RequireAtomic)
             .await
             .expect("WIP retry loop");
 
         self.machine
-            .write_batch(&self.writer_id, &key, &desc)
+            .write_batch(deadline, &self.writer_id, &key, &desc)
             .await
             .expect("WIP");
         self.cap.upper = desc.upper().clone();
@@ -197,9 +201,9 @@ impl<K, V, T, D> WriteHandle<K, V, T, D>
 where
     T: Timestamp + Lattice + Codec64,
 {
-    async fn deregister(&mut self) {
+    async fn deregister(&mut self, deadline: Instant) {
         self.machine
-            .deregister_writer(&self.writer_id)
+            .deregister_writer(deadline, &self.writer_id)
             .await
             .expect("WIP");
     }
@@ -211,6 +215,6 @@ where
     T: Timestamp + Lattice + Codec64,
 {
     fn drop(&mut self) {
-        futures_executor::block_on(self.deregister())
+        futures_executor::block_on(self.deregister(Instant::now() + Duration::from_secs(1_000_000)))
     }
 }

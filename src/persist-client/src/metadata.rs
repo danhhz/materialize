@@ -13,17 +13,17 @@ use crate::{ReaderId, SeqNo, WriterId};
 
 // WIP this is stored in a path containing CollectionId and WriterId. to keep it
 // lean, these aren't denormalized here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WriterMeta {
-    pub(crate) version: SeqNo,
+    pub(crate) seqno: SeqNo,
     pub(crate) upper: Vec<[u8; 8]>,
 }
 
 // WIP this is stored in a path containing CollectionId and WriterId. to keep it
 // lean, these aren't denormalized here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReaderMeta {
-    pub(crate) version: SeqNo,
+    pub(crate) seqno: SeqNo,
     pub(crate) since: Vec<[u8; 8]>,
 }
 
@@ -35,8 +35,8 @@ pub struct ReaderMeta {
 // to this, may as well add CollectionId back.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CollectionMeta {
-    pub(crate) writers: Vec<(WriterId, SeqNo, Vec<[u8; 8]>)>,
-    pub(crate) readers: Vec<(ReaderId, SeqNo, Vec<[u8; 8]>)>,
+    pub(crate) writers: Vec<(WriterId, WriterMeta)>,
+    pub(crate) readers: Vec<(ReaderId, ReaderMeta)>,
 
     // These never change, pull them out into a separate thing?
     pub(crate) key_codec: String,

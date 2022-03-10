@@ -763,12 +763,16 @@ impl S3BlobMultiWriter {
     }
 
     /// WIP
-    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
+    pub async fn get(&self, _deadline: Instant, key: &str) -> Result<Option<Vec<u8>>, Error> {
         self.blob.lock().await.get(key).await
     }
 
     /// WIP
-    pub async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, Error> {
+    pub async fn list_prefix(
+        &self,
+        _deadline: Instant,
+        prefix: &str,
+    ) -> Result<Vec<String>, Error> {
         // WIP more efficient implementation to take advantage of the prefix
         let keys = self.blob.lock().await.list_keys().await?;
         let keys = keys.into_iter().filter(|x| x.starts_with(prefix)).collect();
@@ -776,12 +780,18 @@ impl S3BlobMultiWriter {
     }
 
     /// WIP
-    pub async fn set(&self, key: &str, value: Vec<u8>, atomic: Atomicity) -> Result<(), Error> {
+    pub async fn set(
+        &self,
+        _deadline: Instant,
+        key: &str,
+        value: Vec<u8>,
+        atomic: Atomicity,
+    ) -> Result<(), Error> {
         self.blob.lock().await.set(key, value, atomic).await
     }
 
     /// WIP
-    pub async fn delete(&self, key: &str) -> Result<(), Error> {
+    pub async fn delete(&self, _deadline: Instant, key: &str) -> Result<(), Error> {
         self.blob.lock().await.delete(key).await
     }
 }
