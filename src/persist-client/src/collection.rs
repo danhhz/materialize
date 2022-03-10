@@ -7,19 +7,13 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use differential_dataflow::lattice::Lattice;
-use differential_dataflow::trace::Description;
 use mz_persist::s3::S3BlobMultiWriter;
 use mz_persist::storage::Atomicity;
-use mz_persist_types::Codec64;
-use timely::progress::{Antichain, Timestamp};
 use uuid::Uuid;
 
-use crate::descs::BatchDescs;
 use crate::metadata::{CollectionMeta, ReaderMeta, WriterMeta};
 use crate::paths::Paths;
 use crate::read::ReaderId;
@@ -34,91 +28,25 @@ pub struct Collection {
 }
 
 impl Collection {
-    pub async fn update_metadata<F: FnMut(&Option<CollectionMeta>) -> CollectionMeta>(
+    pub async fn update_metadata<
+        R,
+        F: FnMut(SeqNo, &Option<CollectionMeta>) -> (CollectionMeta, R),
+    >(
         &mut self,
         mut f: F,
-    ) -> Result<(Option<CollectionMeta>, CollectionMeta), anyhow::Error> {
+    ) -> Result<(Option<CollectionMeta>, CollectionMeta, R), anyhow::Error> {
         // TODO: Retry on failure.
-        let (_, mut prev_meta) = self.fetch_meta().await?;
+        let (prev_seqno, mut prev_meta) = self.fetch_meta().await?;
         loop {
-            let new_meta = f(&prev_meta);
+            let (new_meta, ret) = f(prev_seqno, &prev_meta);
             // TODO: Retry on failure.
             let durable_meta = self.cas_meta(&prev_meta, &new_meta).await?;
             if durable_meta.as_ref() == Some(&new_meta) {
-                return Ok((prev_meta.clone(), new_meta));
+                return Ok((prev_meta.clone(), new_meta, ret));
             }
             // We lost a race, try again.
             prev_meta = durable_meta;
         }
-    }
-
-    pub async fn fetch_since<T: Timestamp + Lattice + Codec64>(
-        &self,
-    ) -> Result<Antichain<T>, anyhow::Error> {
-        let (_, meta) = self.fetch_meta().await?;
-        let meta = meta.expect("WIP");
-        self.fetch_sinces(meta.readers.as_slice()).await
-    }
-
-    pub async fn fetch_sinces<T: Timestamp + Lattice + Codec64>(
-        &self,
-        readers: &[ReaderId],
-    ) -> Result<Antichain<T>, anyhow::Error> {
-        let metas = readers.iter().map(|x| self.fetch_reader_meta(x));
-        let mut ret = Antichain::from_elem(T::minimum());
-        for meta in metas {
-            let meta = meta.await?;
-            let mut since = Antichain::new();
-            let _ = since.extend(meta.since.iter().map(|x| T::decode(*x)));
-            ret.meet_assign(&since);
-        }
-        Ok(ret)
-    }
-
-    pub async fn fetch_upper<T: Timestamp + Lattice + Codec64>(
-        &self,
-    ) -> Result<Antichain<T>, anyhow::Error> {
-        let (_, meta) = self.fetch_meta().await?;
-        let meta = meta.expect("WIP");
-        self.fetch_uppers(meta.writers.as_slice()).await
-    }
-
-    pub async fn fetch_uppers<T: Timestamp + Lattice + Codec64>(
-        &self,
-        writers: &[WriterId],
-    ) -> Result<Antichain<T>, anyhow::Error> {
-        let metas = writers.iter().map(|x| self.fetch_writer_meta(x));
-        let mut ret = Antichain::from_elem(T::minimum());
-        for meta in metas {
-            let meta = meta.await?;
-            let mut since = Antichain::new();
-            let _ = since.extend(meta.upper.iter().map(|x| T::decode(*x)));
-            ret.join_assign(&since);
-        }
-        Ok(ret)
-    }
-
-    pub async fn fetch_batch_descs<T: Timestamp + Codec64>(
-        &self,
-    ) -> Result<BatchDescs<T>, anyhow::Error> {
-        let pending = self
-            .blob
-            .list_prefix(&Paths::pending_batch_prefix(&self.id))
-            .await?;
-        let mut pending_by_writer = HashMap::<_, Vec<(String, Description<T>)>>::new();
-        for key in pending {
-            let (writer, desc) = Paths::parse_batch_key(&key)?;
-            pending_by_writer
-                .entry(writer)
-                .or_default()
-                .push((key, desc));
-        }
-        // WIP: Pick the furthest writer?
-        let descs = match pending_by_writer.into_iter().next() {
-            Some((_, descs)) => descs,
-            None => vec![],
-        };
-        Ok(BatchDescs(descs))
     }
 
     async fn fetch_current_meta_key(&self) -> Result<(SeqNo, Option<String>), anyhow::Error> {
@@ -134,7 +62,7 @@ impl Collection {
 
     // WIP I think we probably want to make this not an Option and just
     // specialize the new collection case?
-    async fn fetch_meta(&self) -> Result<(SeqNo, Option<CollectionMeta>), anyhow::Error> {
+    pub async fn fetch_meta(&self) -> Result<(SeqNo, Option<CollectionMeta>), anyhow::Error> {
         let (current, key) = self.fetch_current_meta_key().await?;
         let key = match key {
             Some(x) => x,

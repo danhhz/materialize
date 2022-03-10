@@ -12,6 +12,7 @@ use std::marker::PhantomData;
 use anyhow::anyhow;
 use bytes::BufMut;
 use differential_dataflow::difference::Semigroup;
+use differential_dataflow::lattice::Lattice;
 use differential_dataflow::trace::Description;
 use mz_persist::indexed::columnar::ColumnarRecordsVecBuilder;
 use mz_persist::indexed::encoding::BlobTraceBatchPart;
@@ -22,8 +23,8 @@ use timely::progress::{Antichain, Timestamp};
 use tracing::{debug, trace};
 use uuid::Uuid;
 
-use crate::collection::Collection;
 use crate::error::Permanent;
+use crate::machine::Machine;
 use crate::paths::Paths;
 
 // WIP do we actually want to be able to persist a WriterId? it's hard to
@@ -45,7 +46,7 @@ impl WriterId {
 }
 
 pub struct WriteHandle<K, V, T, D> {
-    pub(crate) collection: Collection,
+    pub(crate) machine: Machine<T>,
     pub(crate) writer_id: WriterId,
     pub(crate) _phantom: PhantomData<(K, V, D)>,
 
@@ -58,7 +59,7 @@ impl<K, V, T, D> WriteHandle<K, V, T, D>
 where
     K: Codec + std::fmt::Debug,
     V: Codec + std::fmt::Debug,
-    T: Timestamp + Codec64,
+    T: Timestamp + Lattice + Codec64,
     D: Semigroup + Codec64,
 {
     // This handle's upper frontier, not the global collection-level one.
@@ -91,16 +92,22 @@ where
 
         // WIP verify lower vs upper
 
-        let key = Paths::pending_batch_key(&self.collection.id, &self.writer_id, &desc);
+        let key = Paths::pending_batch_key(&self.machine.collection.id, &self.writer_id, &desc);
         let mut value = Vec::new();
         Self::encode_batch(&mut value, &desc, updates)?;
 
         debug!("writing batch {}", key);
-        self.collection
+        self.machine
+            .collection
             .blob
             .set(&key, value, Atomicity::RequireAtomic)
             .await
             .expect("WIP retry loop");
+
+        self.machine
+            .write_batch(&self.writer_id, &key, &desc)
+            .await
+            .expect("WIP");
         self.upper = desc.upper().clone();
         Ok(())
     }

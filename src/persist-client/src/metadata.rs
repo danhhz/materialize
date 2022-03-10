@@ -35,8 +35,8 @@ pub struct ReaderMeta {
 // to this, may as well add CollectionId back.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CollectionMeta {
-    pub(crate) writers: Vec<WriterId>,
-    pub(crate) readers: Vec<ReaderId>,
+    pub(crate) writers: Vec<(WriterId, Vec<[u8; 8]>)>,
+    pub(crate) readers: Vec<(ReaderId, Vec<[u8; 8]>)>,
 
     // These never change, pull them out into a separate thing?
     pub(crate) key_codec: String,
@@ -51,7 +51,7 @@ pub struct CollectionMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TraceBatchMeta {
-    lower: Vec<[u8; 8]>,
-    upper: Vec<[u8; 8]>,
-    since: Vec<[u8; 8]>,
+    pub(crate) lower: Vec<[u8; 8]>,
+    pub(crate) upper: Vec<[u8; 8]>,
+    pub(crate) since: Vec<[u8; 8]>,
 }

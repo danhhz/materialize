@@ -25,9 +25,9 @@ use tracing::{debug, trace};
 use uuid::Uuid;
 
 use crate::collection::Collection;
+use crate::descs::BatchDescs;
 use crate::error::Permanent;
-use crate::metadata::ReaderMeta;
-use crate::SeqNo;
+use crate::machine::{Machine, State};
 
 // WIP This probably doesn't need to be Clone, so I've omitted it for now.
 // Pretty sure we could make that work if necessary.
@@ -92,9 +92,12 @@ where
     // WIP: We also need a way to delivery progress information from this.
     pub async fn poll_next(&mut self) -> Vec<((K, V), T, D)> {
         loop {
-            let all_batch_descs = self.collection.fetch_batch_descs().await.expect("WIP");
+            let (_, meta) = self.collection.fetch_meta().await.expect("WIP");
+            let state = State::from_meta(meta.as_ref());
+
+            let all_batch_descs = state.trace.clone();
             debug!("all_batch_descs {:?}", all_batch_descs);
-            for (key, desc) in all_batch_descs.0 {
+            for (key, desc) in all_batch_descs {
                 trace!("listen frontier={:?} considering {:?}", self.frontier, desc);
                 if PartialOrder::less_equal(desc.upper(), &self.frontier) {
                     trace!("listen skipping {:?}", desc);
@@ -164,7 +167,7 @@ impl ReaderId {
 /// A "capability" granting the ability to read the state of some collection at
 /// times greater or equal to `self.since()`.
 pub struct ReadHandle<K, V, T, D> {
-    pub(crate) collection: Collection,
+    pub(crate) machine: Machine<T>,
     pub(crate) reader_id: ReaderId,
     pub(crate) _phantom: PhantomData<(K, V, D)>,
 
@@ -178,13 +181,6 @@ where
     T: Timestamp + Lattice + Codec64,
     D: Semigroup + Codec64,
 {
-    /// The global collection-level since frontier.
-    ///
-    /// Invariant: The handle since is less or equal to this collection since.
-    pub async fn fetch_collection_since(&self) -> Antichain<T> {
-        self.collection.fetch_since().await.expect("WIP")
-    }
-
     /// This handle's since frontier, not the global collection-level one.
     pub fn since(&self) -> &Antichain<T> {
         &self.since
@@ -199,18 +195,10 @@ where
     //
     // WIP AntichainRef?
     pub async fn downgrade_since(&mut self, new_since: Antichain<T>) {
-        let new_meta = ReaderMeta {
-            version: SeqNo::default(),
-            since: new_since.iter().map(|x| T::encode(x)).collect(),
-        };
-        if let Err(_err) = self
-            .collection
-            .write_reader_meta(&self.reader_id, &new_meta)
+        self.machine
+            .downgrade_since(&self.reader_id, &new_since)
             .await
-        {
-            // WIP: At least increment a metric or something.
-            return;
-        }
+            .expect("WIP");
         self.since = new_since;
     }
 
@@ -232,7 +220,7 @@ where
     pub async fn listen(&self, as_of: Antichain<T>) -> Result<Listen<K, V, T, D>, Permanent> {
         // WIP validate that it's okay to read at this as_of
         Ok(Listen {
-            collection: self.collection.clone(),
+            collection: self.machine.collection.clone(),
             frontier: as_of.clone(),
             as_of,
             _phantom: PhantomData,
@@ -261,11 +249,9 @@ where
         as_of: Antichain<T>,
         num_parts: NonZeroUsize,
     ) -> Result<Vec<SnapshotPart>, Permanent> {
-        let all_batch_descs = self
-            .collection
-            .fetch_batch_descs()
-            .await
-            .expect("WIP retry loop");
+        let (_, meta) = self.machine.collection.fetch_meta().await.expect("WIP");
+        let state = State::from_meta(meta.as_ref());
+        let all_batch_descs = BatchDescs(state.trace);
         debug!("all_batch_descs {:?}", all_batch_descs);
         let query_desc = Description::new(
             Antichain::from_elem(T::minimum()),
@@ -317,6 +303,7 @@ where
         for key in part.batches {
             debug!("reading batch {}", key);
             let value = self
+                .machine
                 .collection
                 .blob
                 .get(&key)

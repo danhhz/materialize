@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::collection::Collection;
 use crate::error::{Permanent, StorageError};
-use crate::metadata::CollectionMeta;
+use crate::machine::Machine;
 use crate::read::{ReadHandle, ReaderId};
 use crate::write::{WriteHandle, WriterId};
 
@@ -175,59 +175,25 @@ impl Client {
         T: Timestamp + Lattice + Codec64,
         D: Semigroup + Codec64,
     {
-        let mut collection = Collection {
+        let collection = Collection {
             id,
             blob: self.blob.clone(),
             log: self.log.clone(),
         };
+        let mut machine = Machine::new(collection);
 
         let writer_id = WriterId(Uuid::new_v4().as_bytes().to_owned());
         let reader_id = ReaderId(Uuid::new_v4().as_bytes().to_owned());
-
-        let (prev_meta, _new_meta) = collection
-            .update_metadata(|prev_meta| {
-                let mut meta = CollectionMeta {
-                    writers: vec![],
-                    readers: vec![],
-                    key_codec: K::codec_name(),
-                    val_codec: V::codec_name(),
-                    ts_codec: T::codec_name(),
-                    diff_codec: D::codec_name(),
-                    trace: Vec::new(),
-                };
-                if let Some(prev_meta) = prev_meta.as_ref() {
-                    meta.writers.extend(prev_meta.writers.iter().cloned());
-                    meta.readers.extend(prev_meta.readers.iter().cloned());
-                    // WIP don't panic here, return an error from
-                    // open_collection instead
-                    assert_eq!(K::codec_name(), prev_meta.key_codec);
-                    assert_eq!(V::codec_name(), prev_meta.val_codec);
-                    assert_eq!(T::codec_name(), prev_meta.ts_codec);
-                    assert_eq!(D::codec_name(), prev_meta.diff_codec);
-                }
-                meta.writers.push(writer_id.clone());
-                meta.readers.push(reader_id.clone());
-                meta
-            })
-            .await
-            .expect("WIP add retry loop");
-
-        // Fetch since and upper in parallel.
-        let prev_readers: &[ReaderId] = prev_meta.as_ref().map_or(&[], |x| x.readers.as_slice());
-        let prev_writers: &[WriterId] = prev_meta.as_ref().map_or(&[], |x| x.writers.as_slice());
-        let since = collection.fetch_sinces::<T>(prev_readers);
-        let upper = collection.fetch_uppers::<T>(prev_writers);
-        let since = since.await.expect("WIP add retry loop");
-        let upper = upper.await.expect("WIP add retry loop");
+        let (since, upper) = machine.register(&writer_id, &reader_id).await;
 
         let write = WriteHandle {
-            collection: collection.clone(),
+            machine: machine.clone(),
             writer_id,
             _phantom: PhantomData,
             upper,
         };
         let read = ReadHandle {
-            collection,
+            machine,
             reader_id,
             _phantom: PhantomData,
             since,
