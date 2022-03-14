@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::anyhow;
-use mz_persist::s3::S3BlobMultiWriter;
+use mz_persist::mem::MemBlobMultiWriter;
 use mz_persist::storage::{Atomicity, StorageError};
 use uuid::Uuid;
 
@@ -22,7 +22,7 @@ use crate::{CompareAndSet, Id, Log, MemLog, SeqNo};
 #[derive(Debug, Clone)]
 pub struct Collection {
     pub(crate) id: Id,
-    pub(crate) blob: S3BlobMultiWriter,
+    pub(crate) blob: MemBlobMultiWriter,
     pub(crate) log: Arc<MemLog>,
 }
 

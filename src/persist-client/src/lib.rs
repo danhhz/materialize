@@ -19,7 +19,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use differential_dataflow::difference::Semigroup;
 use differential_dataflow::lattice::Lattice;
-use mz_persist::s3::{S3BlobConfig, S3BlobMultiWriter};
+use mz_persist::mem::{MemBlob, MemBlobMultiWriter};
 use mz_persist::storage::StorageError;
 use mz_persist_types::{Codec, Codec64};
 use serde::{Deserialize, Serialize};
@@ -111,7 +111,7 @@ impl Id {
 }
 
 pub struct Client {
-    blob: S3BlobMultiWriter,
+    blob: MemBlobMultiWriter,
     log: Arc<MemLog>,
 }
 
@@ -122,12 +122,9 @@ impl Client {
     /// The same `location` may be used concurrently from multiple processes.
     /// Concurrent usage is subject to the constraints documented on individual
     /// methods (mostly [WriteHandle::write_batch]).
-    pub async fn new(location: Location, role_arn: Option<String>) -> Result<Self, Permanent> {
-        let config = S3BlobConfig::new(location.bucket, location.prefix, role_arn)
-            .await
-            .map_err(|err| Permanent::new(anyhow!(err)))?;
-        let blob = S3BlobMultiWriter::open_multi_writer(config);
+    pub async fn new(blob: MemBlob) -> Result<Self, Permanent> {
         let log = Arc::new(MemLog::default());
+        let blob = MemBlobMultiWriter::open_multi_writer(blob);
         // WIP verify that blob and log match to catch operator error, probably
         // by writing a new uuid to each of them when they're initialized
         Ok(Client { blob, log })
@@ -276,7 +273,6 @@ mod tests {
     use std::time::Duration;
 
     use futures_util::StreamExt;
-    use mz_persist::s3::S3BlobConfig;
     use tokio::runtime::Runtime;
 
     use super::*;
@@ -288,17 +284,9 @@ mod tests {
         mz_ore::test::init_logging_default("warn");
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let (location, role_arn) = match S3BlobConfig::new_for_test().await? {
-                None => return Ok(()),
-                Some(cfg) => (
-                    Location {
-                        bucket: cfg.bucket,
-                        prefix: cfg.prefix,
-                    },
-                    None,
-                ),
-            };
-            let client = Client::new(location, role_arn).await?;
+            let blob = MemBlob::new_no_reentrance("MemBlob testing");
+            let client = Client::new(blob).await?;
+
             let (mut write, mut read) = client
                 .new_collection::<String, String, u64, i64>(NO_TIMEOUT, Id::new())
                 .await??;

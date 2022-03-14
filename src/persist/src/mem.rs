@@ -12,7 +12,9 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
+use anyhow::anyhow;
 use async_trait::async_trait;
 use mz_ore::cast::CastFrom;
 use mz_ore::metrics::MetricsRegistry;
@@ -25,7 +27,7 @@ use crate::indexed::cache::BlobCache;
 use crate::indexed::metrics::Metrics;
 use crate::indexed::Indexed;
 use crate::runtime::{self, RuntimeConfig};
-use crate::storage::{Atomicity, Blob, BlobRead, LockInfo, Log, SeqNo};
+use crate::storage::{Atomicity, Blob, BlobRead, LockInfo, Log, SeqNo, StorageError};
 use crate::unreliable::{UnreliableBlob, UnreliableHandle, UnreliableLog};
 
 #[derive(Debug)]
@@ -293,6 +295,84 @@ impl BlobRead for MemBlobRead {
     }
 }
 
+/// WIP temporary artifact of fast prototyping
+#[derive(Debug, Clone)]
+pub struct MemBlobMultiWriter {
+    blob: Arc<tokio::sync::Mutex<MemBlob>>,
+}
+
+impl MemBlobMultiWriter {
+    /// Returns a new [MemBlobMultiWriter] opened for multi-writer usage.
+    pub fn open_multi_writer(blob: MemBlob) -> Self {
+        let blob = MemBlobMultiWriter {
+            blob: Arc::new(tokio::sync::Mutex::new(blob)),
+        };
+        blob
+    }
+
+    /// WIP
+    pub async fn get(
+        &self,
+        _deadline: Instant,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let value = self
+            .blob
+            .lock()
+            .await
+            .get(key)
+            .await
+            .map_err(|err| StorageError(anyhow!(err)))?;
+        Ok(value)
+    }
+
+    /// WIP
+    pub async fn list_prefix(
+        &self,
+        _deadline: Instant,
+        prefix: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        // WIP more efficient implementation to take advantage of the prefix
+        let keys = self
+            .blob
+            .lock()
+            .await
+            .list_keys()
+            .await
+            .map_err(|err| StorageError(anyhow!(err)))?;
+        let keys = keys.into_iter().filter(|x| x.starts_with(prefix)).collect();
+        Ok(keys)
+    }
+
+    /// WIP
+    pub async fn set(
+        &self,
+        _deadline: Instant,
+        key: &str,
+        value: Vec<u8>,
+        atomic: Atomicity,
+    ) -> Result<(), StorageError> {
+        self.blob
+            .lock()
+            .await
+            .set(key, value, atomic)
+            .await
+            .map_err(|err| StorageError(anyhow!(err)))?;
+        Ok(())
+    }
+
+    /// WIP
+    pub async fn delete(&self, _deadline: Instant, key: &str) -> Result<(), StorageError> {
+        self.blob
+            .lock()
+            .await
+            .delete(key)
+            .await
+            .map_err(|err| StorageError(anyhow!(err)))?;
+        Ok(())
+    }
+}
+
 /// An in-memory implementation of [Blob].
 #[derive(Debug)]
 pub struct MemBlob {
@@ -310,7 +390,8 @@ impl MemBlob {
     ///
     /// Helper for tests that don't care about locking reentrance (which is most
     /// of them).
-    #[cfg(test)]
+    /// TODO(aljoscha): Weirdly, cfg(test) doesn't seem to work...
+    // #[cfg(test)]
     pub fn new_no_reentrance(lock_info_details: &str) -> Self {
         Self::new(LockInfo::new_no_reentrance(lock_info_details.to_owned()))
     }
