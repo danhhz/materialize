@@ -348,4 +348,149 @@ mod tests {
             Ok(())
         })
     }
+
+    // It seems BatchDescs::cover() didn't correctly include the second written batch before.
+    #[test]
+    fn sanity_check_multi_batch_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+        mz_ore::test::init_logging_default("warn");
+        let rt = Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            let blob = MemBlob::new_no_reentrance("MemBlob testing");
+            let client = Client::new(blob).await?;
+            let (mut write, read) = client
+                .new_collection::<String, String, u64, i64>(NO_TIMEOUT, Id::new())
+                .await??;
+
+            let data = vec![(("1".to_owned(), "one".to_owned()), 1, 1)];
+            assert_eq!(write.upper(), &Antichain::from_elem(u64::minimum()));
+            write
+                .write_batch(
+                    NO_TIMEOUT,
+                    data.iter().map(|((k, v), t, d)| ((k, v), t, d)),
+                    Antichain::from_elem(2),
+                )
+                .await??;
+            assert_eq!(write.upper(), &Antichain::from_elem(2));
+
+            let data = vec![(("2".to_owned(), "two".to_owned()), 2, 1)];
+            write
+                .write_batch(
+                    NO_TIMEOUT,
+                    data.iter().map(|((k, v), t, d)| ((k, v), t, d)),
+                    Antichain::from_elem(3),
+                )
+                .await??;
+            assert_eq!(write.upper(), &Antichain::from_elem(3));
+
+            let mut snap = read
+                .snapshot(
+                    NO_TIMEOUT,
+                    Antichain::from_elem(2),
+                    NonZeroUsize::new(1).unwrap(),
+                )
+                .await??;
+            assert_eq!(snap.len(), 1);
+            let snap = snap.pop().unwrap();
+
+            let mut snap = read.snapshot_part(NO_TIMEOUT, snap).await?.into_stream();
+            let actual = {
+                let mut data = Vec::new();
+                while let Some(((k, v), t, d)) = snap.next().await {
+                    data.push(((k?, v?), t, d));
+                }
+                data
+            };
+
+            let expected = vec![
+                (("1".to_owned(), "one".to_owned()), 2, 1),
+                (("2".to_owned(), "two".to_owned()), 2, 1),
+            ];
+            assert_eq!(actual, expected);
+
+            Ok(())
+        });
+
+        result
+    }
+
+    #[test]
+    fn sanity_check_duplicate_writes() -> Result<(), Box<dyn std::error::Error>> {
+        mz_ore::test::init_logging_default("warn");
+        let rt = Runtime::new().unwrap();
+        let result = rt.block_on(async {
+            let blob = MemBlob::new_no_reentrance("MemBlob testing");
+            let client = Client::new(blob).await?;
+            let (mut write, read) = client
+                .new_collection::<String, String, u64, i64>(NO_TIMEOUT, Id::new())
+                .await??;
+
+            // A second writer that writes the same data, at the same timestamps and then writes
+            // some new data.
+            let (mut write2, _read) = client
+                .open_collection::<String, String, u64, i64>(NO_TIMEOUT, Id::new())
+                .await?;
+
+            let data = vec![(("1".to_owned(), "one".to_owned()), 1, 1)];
+            assert_eq!(write.upper(), &Antichain::from_elem(u64::minimum()));
+            write
+                .write_batch(
+                    NO_TIMEOUT,
+                    data.iter().map(|((k, v), t, d)| ((k, v), t, d)),
+                    Antichain::from_elem(2),
+                )
+                .await??;
+            assert_eq!(write.upper(), &Antichain::from_elem(2));
+
+            assert_eq!(write2.upper(), &Antichain::from_elem(u64::minimum()));
+            let data = vec![(("1".to_owned(), "one".to_owned()), 1, 1)];
+            // This write should NOT show up when reading.
+            write2
+                .write_batch(
+                    NO_TIMEOUT,
+                    data.iter().map(|((k, v), t, d)| ((k, v), t, d)),
+                    Antichain::from_elem(2),
+                )
+                .await??;
+            assert_eq!(write2.upper(), &Antichain::from_elem(2));
+            let data = vec![(("2".to_owned(), "two".to_owned()), 2, 1)];
+            // This write SHOULD show up when reading.
+            write2
+                .write_batch(
+                    NO_TIMEOUT,
+                    data.iter().map(|((k, v), t, d)| ((k, v), t, d)),
+                    Antichain::from_elem(3),
+                )
+                .await??;
+            assert_eq!(write2.upper(), &Antichain::from_elem(3));
+
+            let mut snap = read
+                .snapshot(
+                    NO_TIMEOUT,
+                    Antichain::from_elem(2),
+                    NonZeroUsize::new(1).unwrap(),
+                )
+                .await??;
+            assert_eq!(snap.len(), 1);
+            let snap = snap.pop().unwrap();
+
+            let mut snap = read.snapshot_part(NO_TIMEOUT, snap).await?.into_stream();
+            let actual = {
+                let mut data = Vec::new();
+                while let Some(((k, v), t, d)) = snap.next().await {
+                    data.push(((k?, v?), t, d));
+                }
+                data
+            };
+
+            let expected = vec![
+                (("1".to_owned(), "one".to_owned()), 2, 1),
+                (("2".to_owned(), "two".to_owned()), 2, 1),
+            ];
+            assert_eq!(actual, expected);
+
+            Ok(())
+        });
+
+        result
+    }
 }

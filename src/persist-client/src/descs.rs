@@ -28,7 +28,8 @@ impl<T: Timestamp> BatchDescs<T> {
                 batches.push((key, desc));
             }
             // WIP: Is this right?
-            if PartialOrder::less_equal(query.upper(), &prev_upper) {
+            // aljoscha: it seems not?
+            if PartialOrder::less_than(query.upper(), &prev_upper) {
                 return Ok(batches);
             }
         }
