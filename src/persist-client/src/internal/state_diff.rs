@@ -64,19 +64,19 @@ impl<K: Debug, V: Debug> std::fmt::Debug for StateFieldDiff<K, V> {
 #[derive(Debug)]
 #[cfg_attr(any(test, debug_assertions), derive(Clone, PartialEq))]
 pub struct StateDiff<T> {
-    pub(crate) applier_version: semver::Version,
-    pub(crate) seqno_from: SeqNo,
-    pub(crate) seqno_to: SeqNo,
-    pub(crate) walltime_ms: u64,
-    pub(crate) latest_rollup_key: PartialRollupKey,
-    pub(crate) rollups: Vec<StateFieldDiff<SeqNo, HollowRollup>>,
-    pub(crate) hostname: Vec<StateFieldDiff<(), String>>,
-    pub(crate) last_gc_req: Vec<StateFieldDiff<(), SeqNo>>,
-    pub(crate) leased_readers: Vec<StateFieldDiff<LeasedReaderId, LeasedReaderState<T>>>,
-    pub(crate) critical_readers: Vec<StateFieldDiff<CriticalReaderId, CriticalReaderState<T>>>,
-    pub(crate) writers: Vec<StateFieldDiff<WriterId, WriterState<T>>>,
-    pub(crate) since: Vec<StateFieldDiff<(), Antichain<T>>>,
-    pub(crate) spine: Vec<StateFieldDiff<HollowBatch<T>, ()>>,
+    pub applier_version: semver::Version,
+    pub seqno_from: SeqNo,
+    pub seqno_to: SeqNo,
+    pub walltime_ms: u64,
+    pub latest_rollup_key: PartialRollupKey,
+    pub rollups: Vec<StateFieldDiff<SeqNo, HollowRollup>>,
+    pub hostname: Vec<StateFieldDiff<(), String>>,
+    pub last_gc_req: Vec<StateFieldDiff<(), SeqNo>>,
+    pub leased_readers: Vec<StateFieldDiff<LeasedReaderId, LeasedReaderState<T>>>,
+    pub critical_readers: Vec<StateFieldDiff<CriticalReaderId, CriticalReaderState<T>>>,
+    pub writers: Vec<StateFieldDiff<WriterId, WriterState<T>>>,
+    pub since: Vec<StateFieldDiff<(), Antichain<T>>>,
+    pub spine: Vec<StateFieldDiff<HollowBatch<T>, ()>>,
 }
 
 impl<T: Timestamp + Codec64> StateDiff<T> {
@@ -300,6 +300,10 @@ impl<T: Timestamp + Lattice> State<T> {
             ));
         }
         self.seqno = diff.seqno_to;
+        // WIP oof! should deconstruct StateDiff so we don't miss any more of
+        // these
+        self.applier_version = diff.applier_version;
+        self.walltime_ms = diff.walltime_ms;
 
         // Deconstruct collections so we get a compile failure if new fields are
         // added.

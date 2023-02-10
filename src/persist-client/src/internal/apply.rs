@@ -268,6 +268,7 @@ where
                             write_rollup: state.need_rollup(),
                         };
 
+                        tracing::info!("WIP committed {} {}", state.seqno, state.walltime_ms);
                         return Ok((state.seqno(), Ok(work_ret), maintenance));
                     }
                     Err(diffs_to_current) => {
