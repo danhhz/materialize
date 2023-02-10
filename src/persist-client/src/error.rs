@@ -228,7 +228,7 @@ impl<T> From<Box<CodecMismatch>> for InvalidUsage<T> {
 }
 
 #[derive(Debug)]
-pub(crate) struct CodecMismatchT {
+pub struct CodecMismatchT {
     /// The requested T codec.
     pub(crate) requested: String,
     /// The actual T codec in durable storage.

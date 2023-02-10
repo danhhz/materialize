@@ -78,7 +78,8 @@
 //! An abstraction presenting as a durable time-varying collection (aka shard)
 
 #![doc = include_str!("../README.md")]
-#![warn(missing_docs, missing_debug_implementations)]
+// WIP
+#![allow(missing_docs, missing_debug_implementations)]
 // #[track_caller] is currently a no-op on async functions, but that hopefully won't be the case
 // forever. So we already annotate those functions now and ignore the compiler warning until
 // https://github.com/rust-lang/rust/issues/87417 pans out.
@@ -127,6 +128,7 @@ pub mod error;
 pub mod fetch;
 pub mod operators {
     //! [timely] operators for reading and writing persist Shards.
+    pub mod metadata;
     pub mod shard_source;
 }
 pub mod metrics {

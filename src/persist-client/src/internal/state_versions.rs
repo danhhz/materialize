@@ -480,6 +480,26 @@ impl StateVersions {
         AllLiveDiffs(diffs)
     }
 
+    pub async fn fetch_diffs_from<T: Timestamp + Lattice + Codec64, D: Extend<StateDiff<T>>>(
+        &self,
+        shard_id: &ShardId,
+        seqno: SeqNo,
+        diffs: &mut D,
+    ) {
+        let path = shard_id.to_string();
+        let diffs_raw = retry_external(&self.metrics.retries.external.fetch_state_scan, || async {
+            self.consensus.scan(&path, seqno, 100).await
+        })
+        .instrument(debug_span!("fetch_state::scan"))
+        .await;
+        diffs.extend(diffs_raw.iter().map(|x| {
+            self.metrics
+                .codecs
+                .state_diff
+                .decode(|| StateDiff::<T>::decode(&self.cfg.build_version, &x.data))
+        }));
+    }
+
     /// Fetches recent live_diffs for a shard. Intended for when a caller needs to fetch
     /// the latest state in Consensus.
     ///
@@ -855,6 +875,22 @@ impl<T: Timestamp + Lattice + Codec64> StateVersionsIter<T> {
             self.val_codec.clone(),
             self.diff_codec.clone(),
         )
+    }
+
+    // WIP hacks
+    pub(crate) fn into_components(self) -> (State<T>, Vec<StateDiff<T>>) {
+        let diffs = self
+            .diffs
+            .into_iter()
+            .filter(|x| x.seqno > self.state.seqno)
+            .map(|x| {
+                self.metrics
+                    .codecs
+                    .state_diff
+                    .decode(|| StateDiff::decode(&self.cfg.build_version, &x.data))
+            })
+            .collect();
+        (self.state, diffs)
     }
 }
 
