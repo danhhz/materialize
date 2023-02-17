@@ -18,6 +18,7 @@ use mz_repr::explain::{
     UnsupportedFormat, UsedIndexes,
 };
 
+use crate::relation::CollectionVariant;
 use crate::{
     visit::Visit, Id, LocalId, MapFilterProject, MirRelationExpr, MirScalarExpr, RowSetFinishing,
 };
@@ -129,6 +130,7 @@ pub fn enforce_linear_chains(expr: &mut MirRelationExpr) -> Result<(), Recursion
                     body: Box::new(Get {
                         id: Id::Local(id.clone()),
                         typ: input.typ(),
+                        variant: CollectionVariant::Data,
                     }),
                 };
                 // swap the current body with the replacement

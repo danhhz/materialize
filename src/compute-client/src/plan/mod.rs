@@ -989,7 +989,11 @@ impl<T: timely::progress::Timestamp> Plan<T> {
                 // The plan, not arranged in any way.
                 (plan, AvailableCollections::new_raw())
             }
-            MirRelationExpr::Get { id, typ: _ } => {
+            MirRelationExpr::Get { id, typ, variant } => {
+                if matches!(variant, mz_expr::CollectionVariant::PersistMetadata) {
+                    panic!("yay: {:?}: {:?}", id, typ);
+                }
+
                 // This stage can absorb arbitrary MFP operators.
                 let mut mfp = mfp.take();
                 // If `mfp` is the identity, we can surface all imported arrangements.

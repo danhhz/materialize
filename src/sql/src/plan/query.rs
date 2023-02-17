@@ -43,7 +43,7 @@ use itertools::Itertools;
 use uuid::Uuid;
 
 use mz_expr::virtual_syntax::AlgExcept;
-use mz_expr::{func as expr_func, Id, LocalId, MirScalarExpr, RowSetFinishing};
+use mz_expr::{func as expr_func, CollectionVariant, Id, LocalId, MirScalarExpr, RowSetFinishing};
 use mz_ore::cast::CastFrom;
 use mz_ore::collections::CollectionExt;
 use mz_ore::stack::{CheckedRecursion, RecursionGuard};
@@ -2279,7 +2279,9 @@ fn plan_table_factor(
         }
 
         TableFactor::PersistMetadataFrom { name, alias } => {
-            todo!()
+            let (expr, scope) = qcx.resolve_table_name_for_persist_metadata(name.clone())?;
+            let scope = plan_table_alias(scope, alias.as_ref())?;
+            Ok((expr, scope))
         }
 
         TableFactor::Function {
@@ -5227,6 +5229,7 @@ impl<'a> QueryContext<'a> {
                 let expr = HirRelationExpr::Get {
                     id: Id::Global(item.id()),
                     typ: desc.typ().clone(),
+                    variant: CollectionVariant::Data,
                 };
 
                 let scope = Scope::from_source(Some(name), desc.iter_names().cloned());
@@ -5239,11 +5242,47 @@ impl<'a> QueryContext<'a> {
                 let expr = HirRelationExpr::Get {
                     id: Id::Local(id),
                     typ: cte.desc.typ().clone(),
+                    variant: CollectionVariant::Data,
                 };
 
                 let scope = Scope::from_source(Some(name), cte.desc.iter_names());
 
                 Ok((expr, scope))
+            }
+            ResolvedObjectName::Error => unreachable!("should have been caught in name resolution"),
+        }
+    }
+
+    /// Resolves `object` to a table, for the purposes of getting the persist
+    /// metadata from that table. This is only possible for objects that are
+    /// actually backed by a persist shard/a storage collection.
+    pub fn resolve_table_name_for_persist_metadata(
+        &self,
+        object: ResolvedObjectName,
+    ) -> Result<(HirRelationExpr, Scope), PlanError> {
+        match object {
+            ResolvedObjectName::Object { id, full_name, .. } => {
+                let name = full_name.into();
+                let item = self.scx.get_item(&id);
+
+                // We need to fabricate a RelationDesc for the persist metadata.
+                // TODO(dan): This is where you'd plug in the real schema of the
+                // data that the persist_metadata source spits out.
+                let desc =
+                    RelationDesc::empty().with_column("hi_dan", ScalarType::String.nullable(false));
+
+                let expr = HirRelationExpr::Get {
+                    id: Id::Global(item.id()),
+                    typ: desc.typ().clone(),
+                    variant: CollectionVariant::PersistMetadata,
+                };
+
+                let scope = Scope::from_source(Some(name), desc.iter_names().cloned());
+
+                Ok((expr, scope))
+            }
+            ResolvedObjectName::Cte { .. } => {
+                sql_bail!("cannot get persist metadata from a CTE")
             }
             ResolvedObjectName::Error => unreachable!("should have been caught in name resolution"),
         }

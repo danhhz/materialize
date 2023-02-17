@@ -67,11 +67,12 @@ impl ProjectionLifting {
         self.checked_recur(|_| {
             match relation {
                 MirRelationExpr::Constant { .. } => Ok(()),
-                MirRelationExpr::Get { id, .. } => {
+                MirRelationExpr::Get { id, variant, .. } => {
                     if let Some((typ, columns)) = gets.get(id) {
                         *relation = MirRelationExpr::Get {
                             id: *id,
                             typ: typ.clone(),
+                            variant: variant.clone(),
                         }
                         .project(columns.clone());
                     }

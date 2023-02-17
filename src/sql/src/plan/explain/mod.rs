@@ -11,6 +11,7 @@
 
 use mz_expr::explain::{ExplainContext, ExplainSinglePlan};
 use mz_expr::visit::{Visit, VisitChildren};
+use mz_expr::CollectionVariant;
 use mz_expr::{Id, LocalId};
 use mz_ore::stack::RecursionLimitError;
 use mz_repr::explain::{AnnotatedPlan, Explain, ExplainError, ScalarOps, UnsupportedFormat};
@@ -100,6 +101,7 @@ pub fn normalize_subqueries<'a>(expr: &'a mut HirRelationExpr) -> Result<(), Rec
                         let mut subquery = Get {
                             id: Id::Local(local_id.clone()),
                             typ: RelationType::empty(), // TODO (#13732)
+                            variant: CollectionVariant::Data,
                         };
                         // swap the current subquery with the replacement
                         std::mem::swap(expr, &mut subquery);

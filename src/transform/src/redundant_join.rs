@@ -103,7 +103,11 @@ impl RedundantJoin {
                     Ok(result)
                 }
                 MirRelationExpr::LetRec { .. } => Err(crate::TransformError::LetRecUnsupported)?,
-                MirRelationExpr::Get { id, typ } => {
+                MirRelationExpr::Get {
+                    id,
+                    typ,
+                    variant: _,
+                } => {
                     // Extract the value provenance, or an empty list if unavailable.
                     let mut val_info = lets.get(id).cloned().unwrap_or_default();
                     // Add information about being exactly this let binding too.

@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use mz_expr::visit::VisitChildren;
-use mz_expr::{Id, LocalId, MirRelationExpr, RECURSION_LIMIT};
+use mz_expr::{CollectionVariant, Id, LocalId, MirRelationExpr, RECURSION_LIMIT};
 use mz_ore::cast::CastFrom;
 use mz_ore::stack::{CheckedRecursion, RecursionGuard};
 
@@ -164,6 +164,7 @@ impl Bindings {
                 *relation = MirRelationExpr::Get {
                     id: Id::Local(LocalId::new(*id)),
                     typ,
+                    variant: CollectionVariant::Data,
                 }
             }
 

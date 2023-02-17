@@ -100,6 +100,8 @@ pub enum MirRelationExpr {
         id: Id,
         /// Schema of the collection.
         typ: RelationType,
+        /// Variant/mode we want from the collection.
+        variant: CollectionVariant,
     },
     /// Introduce a temporary dataflow.
     ///
@@ -276,6 +278,15 @@ pub enum MirRelationExpr {
         /// Columns to arrange `input` by, in order of decreasing primacy
         keys: Vec<Vec<MirScalarExpr>>,
     },
+}
+
+/// The variant/mode of accessing the collection.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash, MzReflect)]
+pub enum CollectionVariant {
+    /// Get the actual collection data.
+    Data,
+    /// Get the persist metadata of a collection.
+    PersistMetadata,
 }
 
 impl MirRelationExpr {
@@ -797,6 +808,7 @@ impl MirRelationExpr {
                 if let MirRelationExpr::Get {
                     id: first_id,
                     typ: _,
+                    variant: _,
                 } = base_with_project_stripped
                 {
                     if inputs.len() == 1 {
@@ -807,6 +819,7 @@ impl MirRelationExpr {
                                         if let MirRelationExpr::Get {
                                             id: second_id,
                                             typ: _,
+                                            variant: _,
                                         } = input
                                         {
                                             if first_id == second_id {
@@ -1018,6 +1031,7 @@ impl MirRelationExpr {
         MirRelationExpr::Get {
             id: Id::Global(id),
             typ,
+            variant: CollectionVariant::Data,
         }
     }
 
@@ -1414,6 +1428,7 @@ impl MirRelationExpr {
             let get = MirRelationExpr::Get {
                 id: Id::Local(id),
                 typ: self.typ(),
+                variant: CollectionVariant::Data,
             };
             let body = (body)(id_gen, get);
             MirRelationExpr::Let {

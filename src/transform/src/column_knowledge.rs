@@ -79,11 +79,13 @@ impl ColumnKnowledge {
                 MirRelationExpr::ArrangeBy { input, .. } => {
                     self.harvest(input, knowledge, knowledge_stack)
                 }
-                MirRelationExpr::Get { id, typ } => {
-                    Ok(knowledge.get(id).cloned().unwrap_or_else(|| {
-                        typ.column_types.iter().map(DatumKnowledge::from).collect()
-                    }))
-                }
+                MirRelationExpr::Get {
+                    id,
+                    typ,
+                    variant: _,
+                } => Ok(knowledge.get(id).cloned().unwrap_or_else(|| {
+                    typ.column_types.iter().map(DatumKnowledge::from).collect()
+                })),
                 MirRelationExpr::Constant { rows, typ } => {
                     if let Ok([(row, _diff)]) = rows.as_deref() {
                         let knowledge = row

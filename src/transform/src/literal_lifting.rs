@@ -230,7 +230,11 @@ impl LiteralLifting {
                         Ok(Vec::new())
                     }
                 }
-                MirRelationExpr::Get { id, typ } => {
+                MirRelationExpr::Get {
+                    id,
+                    typ,
+                    variant: _,
+                } => {
                     // A get expression may need to have literal expressions appended to it.
                     let literals = gets.get(id).cloned().unwrap_or_else(Vec::new);
                     if !literals.is_empty() {
