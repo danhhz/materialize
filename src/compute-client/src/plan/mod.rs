@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 
 use mz_expr::JoinImplementation::{DeltaQuery, Differential, IndexedFilter, Unimplemented};
 use mz_expr::{
-    permutation_for_arrangement, CollectionPlan, EvalError, Id, JoinInputMapper, LocalId,
-    MapFilterProject, MirRelationExpr, MirScalarExpr, OptimizedMirRelationExpr, TableFunc,
+    permutation_for_arrangement, CollectionPlan, CollectionVariant, EvalError, Id, JoinInputMapper,
+    LocalId, MapFilterProject, MirRelationExpr, MirScalarExpr, OptimizedMirRelationExpr, TableFunc,
 };
 use mz_ore::soft_panic_or_log;
 use mz_proto::{IntoRustIfSome, ProtoType, RustType, TryFromProtoError};
@@ -168,6 +168,8 @@ pub enum Plan<T = mz_repr::Timestamp> {
     Get {
         /// A global or local identifier naming the collection.
         id: Id,
+        /// Variant/mode we want from the collection.
+        variant: CollectionVariant,
         /// Arrangements that will be available.
         ///
         /// The collection will also be loaded if available, which it will
@@ -400,8 +402,15 @@ impl Arbitrary for Plan {
         let constant = prop::result::maybe_ok(row_diff, EvalError::arbitrary())
             .prop_map(|rows| Plan::Constant { rows });
 
-        let get = (any::<Id>(), any::<AvailableCollections>(), any::<GetPlan>())
-            .prop_map(|(id, keys, plan)| Plan::<mz_repr::Timestamp>::Get { id, keys, plan });
+        let get = (any::<Id>(), any::<AvailableCollections>(), any::<GetPlan>()).prop_map(
+            |(id, keys, plan)| Plan::<mz_repr::Timestamp>::Get {
+                id,
+                // TODO(aljoscha): Make this work.
+                variant: CollectionVariant::Data,
+                keys,
+                plan,
+            },
+        );
 
         let leaf = prop::strategy::Union::new(vec![constant.boxed(), get.boxed()]).boxed();
 
@@ -557,8 +566,14 @@ impl RustType<ProtoPlan> for Plan {
         ProtoPlan {
             kind: Some(match self {
                 Plan::Constant { rows } => Constant(rows.into_proto()),
-                Plan::Get { id, keys, plan } => Get(ProtoPlanGet {
+                Plan::Get {
+                    id,
+                    variant,
+                    keys,
+                    plan,
+                } => Get(ProtoPlanGet {
                     id: Some(id.into_proto()),
+                    variant: Some(variant.into_proto()),
                     keys: Some(keys.into_proto()),
                     plan: Some(plan.into_proto()),
                 }),
@@ -699,6 +714,7 @@ impl RustType<ProtoPlan> for Plan {
             }
             Get(proto) => Plan::Get {
                 id: proto.id.into_rust_if_some("ProtoPlanGet::id")?,
+                variant: proto.variant.into_rust_if_some("ProtoPlanGet::variant")?,
                 keys: proto.keys.into_rust_if_some("ProtoPlanGet::keys")?,
                 plan: proto.plan.into_rust_if_some("ProtoPlanGet::plan")?,
             },
@@ -990,9 +1006,9 @@ impl<T: timely::progress::Timestamp> Plan<T> {
                 (plan, AvailableCollections::new_raw())
             }
             MirRelationExpr::Get { id, typ, variant } => {
-                if matches!(variant, mz_expr::CollectionVariant::PersistMetadata) {
-                    panic!("yay: {:?}: {:?}", id, typ);
-                }
+                // if matches!(variant, mz_expr::CollectionVariant::PersistMetadata) {
+                //     panic!("yay: {:?}: {:?}", id, typ);
+                // }
 
                 // This stage can absorb arbitrary MFP operators.
                 let mut mfp = mfp.take();
@@ -1047,6 +1063,7 @@ impl<T: timely::progress::Timestamp> Plan<T> {
                 (
                     Plan::Get {
                         id: id.clone(),
+                        variant: variant.clone(),
                         keys: in_keys,
                         plan,
                     },
@@ -1720,7 +1737,20 @@ This is not expected to cause incorrect results, but could indicate a performanc
 
                 // For all other variants, just replace inputs with appropriately sharded versions.
                 // This is surprisingly verbose, but that is all it is doing.
-                Plan::Get { id, keys, plan } => vec![Plan::Get { id, keys, plan }; parts],
+                Plan::Get {
+                    id,
+                    variant,
+                    keys,
+                    plan,
+                } => vec![
+                    Plan::Get {
+                        id,
+                        variant,
+                        keys,
+                        plan
+                    };
+                    parts
+                ],
                 Plan::Let { value, body, id } => {
                     let value_parts = value.partition_among(parts);
                     let body_parts = body.partition_among(parts);
@@ -1880,6 +1910,7 @@ impl<T> CollectionPlan for Plan<T> {
             Plan::Constant { rows: _ } => (),
             Plan::Get {
                 id,
+                variant: _,
                 keys: _,
                 plan: _,
             } => match id {

@@ -65,6 +65,7 @@ message ProtoPlan {
         mz_expr.id.ProtoId id = 1;
         ProtoAvailableCollections keys = 2;
         ProtoGetPlan plan = 3;
+        mz_expr.id.ProtoVariant variant = 4;
    }
 
    message ProtoPlanLet {

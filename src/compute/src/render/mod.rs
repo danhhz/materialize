@@ -125,6 +125,7 @@ use mz_storage_client::source::persist_source;
 use mz_storage_client::source::persist_source::FlowControl;
 use mz_storage_client::types::errors::DataflowError;
 use mz_timely_util::probe::{self, ProbeNotify};
+use tracing::info;
 
 use crate::arrangement::manager::TraceBundle;
 use crate::compute_state::ComputeState;
@@ -670,7 +671,18 @@ where
 
                 CollectionBundle::from_collections(ok_collection, err_collection)
             }
-            Plan::Get { id, keys, plan } => {
+            Plan::Get {
+                id,
+                variant,
+                keys,
+                plan,
+            } => {
+                if matches!(variant, mz_expr::CollectionVariant::PersistMetadata) {
+                    panic!("yay: {:?}: {:?} {:?}", id, keys, plan);
+                }
+                if matches!(variant, mz_expr::CollectionVariant::Data) {
+                    info!("nope, it's data: {:?}: {:?} {:?}", id, keys, plan);
+                }
                 // Recover the collection from `self` and then apply `mfp` to it.
                 // If `mfp` happens to be trivial, we can just return the collection.
                 let mut collection = self

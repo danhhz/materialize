@@ -21,6 +21,14 @@ message ProtoId {
     }
 }
 
+message ProtoVariant {
+   enum Variant {
+       DATA = 0;
+       PERSIST_METADATA = 1;
+   }
+   Variant variant = 2;
+}
+
 message ProtoLocalId {
     uint64 value = 1;
 }

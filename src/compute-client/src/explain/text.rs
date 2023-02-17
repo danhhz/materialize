@@ -65,7 +65,13 @@ impl DisplayText<PlanRenderingContext<'_, Plan>> for Plan {
                     writeln!(f, "{}Error {}", ctx.indent, err.to_string().quoted())?;
                 }
             },
-            Get { id, keys, plan } => {
+            Get {
+                id,
+                // TODO!
+                variant: _,
+                keys,
+                plan,
+            } => {
                 ctx.indent.set(); // mark the current indent level
 
                 // Resolve the id as a string.

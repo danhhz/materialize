@@ -18,7 +18,7 @@ use mz_repr::explain::{
     UnsupportedFormat, UsedIndexes,
 };
 
-use crate::relation::CollectionVariant;
+use crate::id::CollectionVariant;
 use crate::{
     visit::Visit, Id, LocalId, MapFilterProject, MirRelationExpr, MirScalarExpr, RowSetFinishing,
 };

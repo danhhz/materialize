@@ -32,6 +32,7 @@ use mz_repr::explain::{DummyHumanizer, ExplainConfig, ExprHumanizer, PlanRenderi
 use mz_repr::{ColumnName, ColumnType, Datum, Diff, GlobalId, RelationType, Row, ScalarType};
 
 use crate::visit::{Visit, VisitChildren};
+use crate::CollectionVariant;
 use crate::{
     func as scalar_func, EvalError, FilterCharacteristics, Id, LocalId, MirScalarExpr, UnaryFunc,
     VariadicFunc,
@@ -278,15 +279,6 @@ pub enum MirRelationExpr {
         /// Columns to arrange `input` by, in order of decreasing primacy
         keys: Vec<Vec<MirScalarExpr>>,
     },
-}
-
-/// The variant/mode of accessing the collection.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize, Hash, MzReflect)]
-pub enum CollectionVariant {
-    /// Get the actual collection data.
-    Data,
-    /// Get the persist metadata of a collection.
-    PersistMetadata,
 }
 
 impl MirRelationExpr {

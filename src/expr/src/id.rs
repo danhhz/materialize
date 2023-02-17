@@ -199,6 +199,52 @@ impl RustType<ProtoPartitionId> for PartitionId {
     }
 }
 
+/// The variant/mode of accessing an Id.
+#[derive(
+    Arbitrary,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Hash,
+    Serialize,
+    Deserialize,
+    MzReflect,
+)]
+pub enum CollectionVariant {
+    /// Get the actual collection data.
+    Data,
+    /// Get the persist metadata of a collection.
+    PersistMetadata,
+}
+
+impl Default for CollectionVariant {
+    fn default() -> Self {
+        CollectionVariant::Data
+    }
+}
+
+impl RustType<ProtoVariant> for CollectionVariant {
+    fn into_proto(&self) -> ProtoVariant {
+        let variant = match self {
+            CollectionVariant::Data => proto_variant::Variant::Data.into(),
+            CollectionVariant::PersistMetadata => proto_variant::Variant::PersistMetadata.into(),
+        };
+        ProtoVariant { variant }
+    }
+
+    fn from_proto(proto: ProtoVariant) -> Result<Self, TryFromProtoError> {
+        match proto_variant::Variant::from_i32(proto.variant) {
+            Some(proto_variant::Variant::Data) => Ok(CollectionVariant::Data),
+            Some(proto_variant::Variant::PersistMetadata) => Ok(CollectionVariant::Data),
+            Option::None => Err(TryFromProtoError::missing_field("ProtoVariant::variant")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

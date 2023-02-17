@@ -97,8 +97,8 @@ pub mod visit;
 
 pub use relation::canonicalize;
 
-pub use id::{Id, LocalId, PartitionId, SourceInstanceId};
-pub use id::{ProtoId, ProtoLocalId};
+pub use id::{CollectionVariant, Id, LocalId, PartitionId, SourceInstanceId};
+pub use id::{ProtoId, ProtoLocalId, ProtoVariant};
 pub use linear::{
     memoize_expr,
     plan::{MfpPlan, SafeMfpPlan},
@@ -109,9 +109,9 @@ pub use relation::func::{AggregateFunc, LagLeadType, TableFunc};
 pub use relation::func::{AnalyzedRegex, CaptureGroupDesc};
 pub use relation::join_input_mapper::JoinInputMapper;
 pub use relation::{
-    compare_columns, AggregateExpr, CollectionPlan, CollectionVariant, ColumnOrder,
-    JoinImplementation, MirRelationExpr, ProtoAggregateExpr, RowSetFinishing, WindowFrame,
-    WindowFrameBound, WindowFrameUnits, RECURSION_LIMIT,
+    compare_columns, AggregateExpr, CollectionPlan, ColumnOrder, JoinImplementation,
+    MirRelationExpr, ProtoAggregateExpr, RowSetFinishing, WindowFrame, WindowFrameBound,
+    WindowFrameUnits, RECURSION_LIMIT,
 };
 pub use relation::{
     JoinInputCharacteristics, ProtoAggregateFunc, ProtoColumnOrder, ProtoRowSetFinishing,
