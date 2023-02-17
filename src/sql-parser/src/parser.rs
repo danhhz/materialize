@@ -5250,6 +5250,8 @@ impl<'a> Parser<'a> {
             })
         } else if self.parse_keywords(&[ROWS, FROM]) {
             Ok(self.parse_rows_from()?)
+        } else if self.parse_keywords(&[PERSIST, METADATA, FROM]) {
+            Ok(self.parse_persist_metadata_from()?)
         } else {
             let name = self.parse_raw_name()?;
             match name {
@@ -5281,6 +5283,16 @@ impl<'a> Parser<'a> {
             functions,
             alias,
             with_ordinality,
+        })
+    }
+
+    fn parse_persist_metadata_from(&mut self) -> Result<TableFactor<Raw>, ParserError> {
+        self.expect_token(&Token::LParen)?;
+        let name = self.parse_raw_name()?;
+        self.expect_token(&Token::RParen)?;
+        Ok(TableFactor::PersistMetadataFrom {
+            name,
+            alias: self.parse_optional_table_alias()?,
         })
     }
 

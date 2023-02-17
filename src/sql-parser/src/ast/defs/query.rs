@@ -487,6 +487,10 @@ pub enum TableFactor<T: AstInfo> {
         name: T::ObjectName,
         alias: Option<TableAlias>,
     },
+    PersistMetadataFrom {
+        name: T::ObjectName,
+        alias: Option<TableAlias>,
+    },
     Function {
         function: TableFunction<T>,
         alias: Option<TableAlias>,
@@ -517,6 +521,15 @@ impl<T: AstInfo> AstDisplay for TableFactor<T> {
         match self {
             TableFactor::Table { name, alias } => {
                 f.write_node(name);
+                if let Some(alias) = alias {
+                    f.write_str(" AS ");
+                    f.write_node(alias);
+                }
+            }
+            TableFactor::PersistMetadataFrom { name, alias } => {
+                f.write_str("PERSIST METADATA FROM (");
+                f.write_node(name);
+                f.write_str(")");
                 if let Some(alias) = alias {
                     f.write_str(" AS ");
                     f.write_node(alias);

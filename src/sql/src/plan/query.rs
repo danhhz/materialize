@@ -2278,6 +2278,10 @@ fn plan_table_factor(
             Ok((expr, scope))
         }
 
+        TableFactor::PersistMetadataFrom { name, alias } => {
+            todo!()
+        }
+
         TableFactor::Function {
             function,
             alias,

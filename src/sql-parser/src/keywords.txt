@@ -245,6 +245,7 @@ Outer
 Over
 Partition
 Password
+Persist
 Physical
 Plan
 Plans
