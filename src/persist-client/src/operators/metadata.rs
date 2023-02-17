@@ -54,7 +54,7 @@ impl<T: Timestamp + Lattice + Codec64> ShardDiffsStream<T> {
             .fetch_all_live_states(shard_id)
             .await
             .check_ts_codec()?;
-        let (state, fetched_diffs) = state_iter.into_components();
+        let (state, mut fetched_diffs) = state_iter.into_components();
 
         // Prepend (to the back) a diff from the initial state to the current
         // one.
@@ -69,6 +69,7 @@ impl<T: Timestamp + Lattice + Codec64> ShardDiffsStream<T> {
         let initial_diff = StateDiff::from_diff(&initial_state.state, &state);
         let mut diffs = VecDeque::with_capacity(fetched_diffs.len() + 1);
         diffs.push_back(initial_diff);
+        fetched_diffs.reverse();
         diffs.extend(fetched_diffs.into_iter());
         Ok(ShardDiffsStream {
             state_versions,

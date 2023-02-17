@@ -1005,7 +1005,11 @@ impl<T: timely::progress::Timestamp> Plan<T> {
                 // The plan, not arranged in any way.
                 (plan, AvailableCollections::new_raw())
             }
-            MirRelationExpr::Get { id, typ, variant } => {
+            MirRelationExpr::Get {
+                id,
+                typ: _typ,
+                variant,
+            } => {
                 // if matches!(variant, mz_expr::CollectionVariant::PersistMetadata) {
                 //     panic!("yay: {:?}: {:?}", id, typ);
                 // }

@@ -594,12 +594,18 @@ impl StateVersions {
 
     /// Truncates any diffs in consensus less than the given seqno.
     pub async fn truncate_diffs(&self, shard_id: &ShardId, seqno: SeqNo) {
-        let path = shard_id.to_string();
-        let _deleted_count = retry_external(&self.metrics.retries.external.gc_truncate, || async {
-            self.consensus.truncate(&path, seqno).await
-        })
-        .instrument(debug_span!("gc::truncate"))
-        .await;
+        tracing::debug!(
+            "{} {} {:?}",
+            shard_id,
+            seqno,
+            self.metrics.retries.external.gc_truncate
+        );
+        // let path = shard_id.to_string();
+        // let _deleted_count = retry_external(&self.metrics.retries.external.gc_truncate, || async {
+        //     self.consensus.truncate(&path, seqno).await
+        // })
+        // .instrument(debug_span!("gc::truncate"))
+        // .await;
     }
 
     // Writes a self-referential rollup to blob storage and returns the diff

@@ -239,7 +239,7 @@ impl RustType<ProtoVariant> for CollectionVariant {
     fn from_proto(proto: ProtoVariant) -> Result<Self, TryFromProtoError> {
         match proto_variant::Variant::from_i32(proto.variant) {
             Some(proto_variant::Variant::Data) => Ok(CollectionVariant::Data),
-            Some(proto_variant::Variant::PersistMetadata) => Ok(CollectionVariant::Data),
+            Some(proto_variant::Variant::PersistMetadata) => Ok(CollectionVariant::PersistMetadata),
             Option::None => Err(TryFromProtoError::missing_field("ProtoVariant::variant")),
         }
     }

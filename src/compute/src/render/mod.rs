@@ -106,8 +106,10 @@ use std::sync::Arc;
 
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::AsCollection;
+use mz_storage_client::source::persist_metadata::persist_metadata;
 use timely::communication::Allocate;
 use timely::dataflow::operators::to_stream::ToStream;
+use timely::dataflow::operators::Map;
 use timely::dataflow::scopes::Child;
 use timely::dataflow::Scope;
 use timely::order::Product;
@@ -118,7 +120,7 @@ use timely::PartialOrder;
 
 use mz_compute_client::plan::Plan;
 use mz_compute_client::types::dataflows::{BuildDesc, DataflowDescription, IndexDesc};
-use mz_expr::Id;
+use mz_expr::{CollectionVariant, Id};
 use mz_repr::{GlobalId, Row};
 use mz_storage_client::controller::CollectionMetadata;
 use mz_storage_client::source::persist_source;
@@ -140,6 +142,19 @@ mod reduce;
 pub mod sinks;
 mod threshold;
 mod top_k;
+
+fn is_metadata_plan(plan: &Plan, source_id: &mz_expr::Id) -> bool {
+    match plan {
+        Plan::Get { id, variant, .. }
+            if id == source_id && variant == &CollectionVariant::PersistMetadata =>
+        {
+            true
+        }
+        Plan::Let { value, .. } => is_metadata_plan(&value, source_id),
+        Plan::Reduce { input, .. } => is_metadata_plan(&input, source_id),
+        _ => false,
+    }
+}
 
 /// Assemble the "compute"  side of a dataflow, i.e. all but the sources.
 ///
@@ -211,20 +226,74 @@ pub fn build_compute_dataflow<A: Allocate>(
                         max_inflight_bytes: compute_state.dataflow_max_inflight_bytes,
                     };
 
-                    // Note: For correctness, we require that sources only emit times advanced by
-                    // `dataflow.as_of`. `persist_source` is documented to provide this guarantee.
-                    let (mut ok_stream, err_stream, token) = persist_source::persist_source(
-                        inner,
-                        *source_id,
-                        Arc::clone(&compute_state.persist_clients),
-                        source.storage_metadata.clone(),
-                        dataflow.as_of.clone(),
-                        dataflow.until.clone(),
-                        mfp.as_mut(),
-                        Some(flow_control),
-                        // Copy the logic in DeltaJoin/Get/Join to start.
-                        |_timer, count| count > 1_000_000,
-                    );
+                    // Hacks!
+                    let is_metadata = dataflow
+                        .objects_to_build
+                        .iter()
+                        .any(|x| is_metadata_plan(&x.plan, &mz_expr::Id::Global(*source_id)));
+                    tracing::info!("WIP source {} is_metadata={}", source_id, is_metadata);
+
+                    let (mut ok_stream, err_stream, token) = if is_metadata {
+                        let (rows, token) = persist_metadata(
+                            inner,
+                            &format!("batches({})", source_id),
+                            Arc::clone(&compute_state.persist_clients),
+                            source.storage_metadata.persist_location.clone(),
+                            source.storage_metadata.data_shard,
+                        );
+                        let oks = rows.batches.inner.flat_map({
+                            let mfp = mfp.take();
+                            move |(row, time, diff)| {
+                                let until = timely::progress::Antichain::new();
+                                let mut datum_vec = mz_repr::DatumVec::new();
+                                let mut row_builder = Row::default();
+                                let mut ret = Vec::new();
+                                if let Some(mfp) = &mfp {
+                                    let arena = mz_repr::RowArena::new();
+                                    let mut datums_local = datum_vec.borrow_with(&row);
+                                    for result in mfp.evaluate::<mz_expr::EvalError, _>(
+                                        &mut datums_local,
+                                        &arena,
+                                        time,
+                                        diff,
+                                        |time| !until.less_equal(time),
+                                        &mut row_builder,
+                                    ) {
+                                        match result {
+                                            Ok((row, time, diff)) => {
+                                                ret.push((row, time, diff));
+                                            }
+                                            Err((err, time, diff)) => {
+                                                dbg!(err, time, diff);
+                                                todo!("WIP");
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    ret.push((row, time, diff));
+                                }
+                                tracing::info!("after mfp {:?}", ret);
+                                ret
+                            }
+                        });
+                        let errs = timely::dataflow::operators::generic::operator::empty(inner);
+                        (oks, errs, token)
+                    } else {
+                        // Note: For correctness, we require that sources only emit times advanced by
+                        // `dataflow.as_of`. `persist_source` is documented to provide this guarantee.
+                        persist_source::persist_source(
+                            inner,
+                            *source_id,
+                            Arc::clone(&compute_state.persist_clients),
+                            source.storage_metadata.clone(),
+                            dataflow.as_of.clone(),
+                            dataflow.until.clone(),
+                            mfp.as_mut(),
+                            Some(flow_control),
+                            // Copy the logic in DeltaJoin/Get/Join to start.
+                            |_timer, count| count > 1_000_000,
+                        )
+                    };
 
                     // If `mfp` is non-identity, we need to apply what remains.
                     // For the moment, assert that it is either trivial or `None`.
@@ -678,10 +747,7 @@ where
                 plan,
             } => {
                 if matches!(variant, mz_expr::CollectionVariant::PersistMetadata) {
-                    panic!("yay: {:?}: {:?} {:?}", id, keys, plan);
-                }
-                if matches!(variant, mz_expr::CollectionVariant::Data) {
-                    info!("nope, it's data: {:?}: {:?} {:?}", id, keys, plan);
+                    info!("yay: {:?}: {:?} {:?}", id, keys, plan);
                 }
                 // Recover the collection from `self` and then apply `mfp` to it.
                 // If `mfp` happens to be trivial, we can just return the collection.

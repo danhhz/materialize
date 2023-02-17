@@ -40,6 +40,7 @@ use std::iter;
 use std::mem;
 
 use itertools::Itertools;
+use mz_storage_client::source::persist_metadata;
 use uuid::Uuid;
 
 use mz_expr::virtual_syntax::AlgExcept;
@@ -5265,11 +5266,10 @@ impl<'a> QueryContext<'a> {
                 let name = full_name.into();
                 let item = self.scx.get_item(&id);
 
-                // We need to fabricate a RelationDesc for the persist metadata.
-                // TODO(dan): This is where you'd plug in the real schema of the
-                // data that the persist_metadata source spits out.
-                let desc =
-                    RelationDesc::empty().with_column("hi_dan", ScalarType::String.nullable(false));
+                // TODO: Switch between the various metadata collections
+                // somehow. Maybe something like `PERSIST BATCHES/FOO/BAR
+                // METADATA`?
+                let desc = persist_metadata::BATCHES_DESC.clone();
 
                 let expr = HirRelationExpr::Get {
                     id: Id::Global(item.id()),

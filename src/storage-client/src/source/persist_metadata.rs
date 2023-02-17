@@ -22,11 +22,20 @@ use mz_persist_client::operators::metadata::{
 use mz_persist_client::read::LeasedReaderId;
 use mz_persist_client::write::WriterId;
 use mz_persist_client::{PersistLocation, ShardId};
-use mz_repr::{Datum, Diff, Row, RowPacker, Timestamp};
+use mz_repr::{Datum, Diff, RelationDesc, Row, RowPacker, ScalarType, Timestamp};
 use mz_timely_util::builder_async::OperatorBuilder;
+use once_cell::sync::Lazy;
 use timely::dataflow::operators::probe::Handle as ProbeHandle;
 use timely::dataflow::Scope;
 use timely::progress::Antichain;
+
+pub static BATCHES_DESC: Lazy<RelationDesc> = Lazy::new(|| {
+    RelationDesc::empty()
+        .with_column("lower", ScalarType::UInt64.nullable(true))
+        .with_column("upper", ScalarType::UInt64.nullable(true))
+        .with_column("since", ScalarType::UInt64.nullable(true))
+        .with_column("encoded_size_bytes", ScalarType::UInt64.nullable(false))
+});
 
 pub fn persist_metadata<G>(
     scope: &G,
@@ -106,9 +115,7 @@ pub struct PersistMetadata<G: Scope> {
     // RelationDesc::empty()
     //   .with_column("ts", ScalarType::UInt64.nullable(true))
     pub since: Collection<G, Row, Diff>,
-    // RelationDesc::empty()
-    //   .with_column("key", ScalarType::String.nullable(false))
-    //   .with_column("encoded_size_bytes", ScalarType::UInt64.nullable(false))
+    /// [BATCHES_DESC]
     pub batches: Collection<G, Row, Diff>,
     // RelationDesc::empty()
     //   .with_column("id", ScalarType::String.nullable(false))
@@ -139,9 +146,15 @@ fn since_to_row(_: &(), since: &Antichain<Timestamp>, row: &mut RowPacker) {
 }
 
 fn spine_to_row(batch: &HollowBatch<Timestamp>, _: &(), row: &mut RowPacker) {
-    row.push(Datum::from(batch.desc.lower().as_option().copied()));
-    row.push(Datum::from(batch.desc.upper().as_option().copied()));
-    row.push(Datum::from(batch.desc.since().as_option().copied()));
+    row.push(Datum::from(
+        batch.desc.lower().as_option().map(|x| u64::from(x)),
+    ));
+    row.push(Datum::from(
+        batch.desc.upper().as_option().map(|x| u64::from(x)),
+    ));
+    row.push(Datum::from(
+        batch.desc.since().as_option().map(|x| u64::from(x)),
+    ));
     row.push(Datum::from(u64::cast_from(
         batch
             .parts
