@@ -145,6 +145,7 @@ mod internal {
     pub mod compact;
     pub mod encoding;
     pub mod gc;
+    pub mod lease;
     pub mod machine;
     pub mod maintenance;
     pub mod metrics;

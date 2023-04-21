@@ -10,9 +10,8 @@
 //! Read capabilities and handles
 
 use std::backtrace::Backtrace;
-use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use differential_dataflow::consolidation::consolidate_updates;
@@ -35,6 +34,7 @@ use crate::fetch::{
     fetch_leased_part, BatchFetcher, FetchedPart, LeasedBatchPart, SerdeLeasedBatchPartMetadata,
 };
 use crate::internal::encoding::Schemas;
+use crate::internal::lease::ProgressSeqnoLease;
 use crate::internal::machine::Machine;
 use crate::internal::metrics::{Metrics, MetricsRetryStream};
 use crate::internal::state::{HollowBatch, Since};
@@ -169,9 +169,9 @@ where
         ret
     }
 
-    /// Returns a [`SubscriptionLeaseReturner`] tied to this [`Subscribe`].
-    pub(crate) fn lease_returner(&self) -> &SubscriptionLeaseReturner<T> {
-        self.listen.handle.lease_returner()
+    /// Returns a [`ProgressSeqnoLease`] tied to this [`Subscribe`].
+    pub(crate) fn seqno_lease(&self) -> Arc<ProgressSeqnoLease<T>> {
+        self.listen.handle.seqno_lease()
     }
 }
 
@@ -318,11 +318,8 @@ where
             lower: self.frontier.iter().map(T::encode).collect(),
         };
         self.handle
-            .lease_returner()
-            .leased_seqnos
-            .lock()
-            .expect("lock")
-            .push_back((new_frontier.clone(), seqno));
+            .seqno_lease
+            .take_lease_frontier_exclusive(seqno, new_frontier.clone());
         let parts = self.handle.lease_batch_parts(batch, metadata).collect();
 
         self.handle.maybe_downgrade_since(&self.since).await;
@@ -418,24 +415,6 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct SubscriptionLeaseReturner<T> {
-    leased_seqnos: Arc<Mutex<VecDeque<(Antichain<T>, SeqNo)>>>,
-}
-
-impl<T: Timestamp + Codec64> SubscriptionLeaseReturner<T> {
-    pub(crate) fn release_leases(&self, progress: &Antichain<T>) {
-        let mut leased_seqnos = self.leased_seqnos.lock().expect("lock");
-        while let Some((frontier, _seqno)) = leased_seqnos.front() {
-            if PartialOrder::less_equal(frontier, progress) {
-                leased_seqnos.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-}
-
 /// A "capability" granting the ability to read the state of some shard at times
 /// greater or equal to `self.since()`.
 ///
@@ -476,7 +455,7 @@ where
     since: Antichain<T>,
     pub(crate) last_heartbeat: EpochMillis,
     explicitly_expired: bool,
-    lease_returner: SubscriptionLeaseReturner<T>,
+    seqno_lease: Arc<ProgressSeqnoLease<T>>,
 
     pub(crate) heartbeat_task: Option<JoinHandle<()>>,
 }
@@ -510,9 +489,7 @@ where
             since,
             last_heartbeat,
             explicitly_expired: false,
-            lease_returner: SubscriptionLeaseReturner {
-                leased_seqnos: Arc::new(Mutex::new(VecDeque::new())),
-            },
+            seqno_lease: Arc::new(ProgressSeqnoLease::default()),
             heartbeat_task: Some(machine.start_reader_heartbeat_task(reader_id, gc).await),
         }
     }
@@ -537,13 +514,7 @@ where
     #[instrument(level = "debug", skip_all, fields(shard = %self.machine.shard_id()))]
     pub async fn downgrade_since(&mut self, new_since: &Antichain<T>) {
         // Guaranteed to be the smallest/oldest outstanding lease on a `SeqNo`.
-        let outstanding_seqno = self
-            .lease_returner
-            .leased_seqnos
-            .lock()
-            .expect("lock poisoned")
-            .front()
-            .map(|(_, seqno)| *seqno);
+        let outstanding_seqno = self.seqno_lease.held_seqno();
 
         let heartbeat_ts = (self.cfg.now)();
         let (_seqno, current_reader_since, maintenance) = self
@@ -564,7 +535,7 @@ where
                     self.reader_id,
                     outstanding_seqno,
                     _seqno,
-                    self.lease_returner.leased_seqnos.lock().expect("lock"),
+                    self.seqno_lease,
                     // The Debug impl of backtrace is less aesthetic, but will put the trace
                     // on a single line and play more nicely with our Honeycomb quota
                     Backtrace::capture(),
@@ -630,7 +601,7 @@ where
         let metadata = SerdeLeasedBatchPartMetadata::Snapshot {
             as_of: as_of.iter().map(T::encode).collect(),
         };
-        self.lease_seqno(seqno, as_of);
+        self.seqno_lease.take_lease_frontier_inclusive(seqno, as_of);
 
         let mut leased_parts = Vec::new();
         for batch in batches {
@@ -676,21 +647,11 @@ where
         })
     }
 
-    /// Tracks that the given `SeqNo` is being "leased out" and cannot be
-    /// garbage collected until we've finished fetching past the given frontier.
-    fn lease_seqno(&mut self, seqno: SeqNo, frontier: Antichain<T>) {
-        self.lease_returner
-            .leased_seqnos
-            .lock()
-            .expect("lock")
-            .push_back((frontier, seqno))
-    }
-
-    /// Returns a [`SubscriptionLeaseReturner`] tied to this [`ReadHandle`],
-    /// allowing a caller to return leases without needing to mutably borrowing
-    /// this `ReadHandle` directly.
-    pub(crate) fn lease_returner(&self) -> &SubscriptionLeaseReturner<T> {
-        &self.lease_returner
+    /// Returns a [`ProgressSeqnoLease`] tied to this [`ReadHandle`], allowing a
+    /// caller to return leases without needing to mutably borrowing this
+    /// `ReadHandle` directly.
+    pub(crate) fn seqno_lease(&self) -> Arc<ProgressSeqnoLease<T>> {
+        Arc::clone(&self.seqno_lease)
     }
 
     /// Returns an independent [ReadHandle] with a new [LeasedReaderId] but the
@@ -922,7 +883,7 @@ where
             }
         }
         // WIP this needs to care about inclusive vs exclusive frontiers.
-        self.lease_returner().release_leases(&as_of);
+        self.seqno_lease.release_leases(&as_of);
 
         // Note that if there is only one part, it's consolidated in the loop
         // above, and we don't consolidate it again here.

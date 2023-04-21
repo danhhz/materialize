@@ -306,7 +306,7 @@ where
         });
 
         let mut batch_parts = vec![];
-        let lease_returner = subscription.lease_returner().clone();
+        let lease_returner = subscription.seqno_lease();
         let (_keep_subscribe_alive_tx, keep_subscribe_alive_rx) = tokio::sync::oneshot::channel::<()>();
         let subscription_stream = async_stream::stream! {
             // Eagerly yield the initial as_of. This makes sure that the output
