@@ -10,7 +10,7 @@
 #![allow(missing_docs)] // WIP
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use mz_persist::location::SeqNo;
 use timely::progress::{Antichain, Timestamp};
@@ -25,6 +25,10 @@ enum Frontier<T> {
 pub struct ProgressSeqnoLease<T> {
     // Invariant: sorted by ascending SeqNo.
     leased_seqnos: Mutex<VecDeque<(SeqNo, Frontier<T>)>>,
+}
+
+pub struct ProgressSeqnoLeaseReturner<T> {
+    wrapped: Arc<ProgressSeqnoLease<T>>,
 }
 
 impl<T> Default for ProgressSeqnoLease<T> {
@@ -104,5 +108,15 @@ impl<T: Timestamp> ProgressSeqnoLease<T> {
                 break;
             }
         }
+    }
+
+    pub fn returner(self: Arc<Self>) -> ProgressSeqnoLeaseReturner<T> {
+        ProgressSeqnoLeaseReturner { wrapped: self }
+    }
+}
+
+impl<T: Timestamp> ProgressSeqnoLeaseReturner<T> {
+    pub fn release_leases(&self, progress: &Antichain<T>) {
+        self.wrapped.release_leases(progress)
     }
 }

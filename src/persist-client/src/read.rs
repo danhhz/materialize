@@ -34,7 +34,7 @@ use crate::fetch::{
     fetch_leased_part, BatchFetcher, FetchedPart, LeasedBatchPart, SerdeLeasedBatchPartMetadata,
 };
 use crate::internal::encoding::Schemas;
-use crate::internal::lease::ProgressSeqnoLease;
+use crate::internal::lease::{ProgressSeqnoLease, ProgressSeqnoLeaseReturner};
 use crate::internal::machine::Machine;
 use crate::internal::metrics::{Metrics, MetricsRetryStream};
 use crate::internal::state::{HollowBatch, Since};
@@ -170,8 +170,8 @@ where
     }
 
     /// Returns a [`ProgressSeqnoLease`] tied to this [`Subscribe`].
-    pub(crate) fn seqno_lease(&self) -> Arc<ProgressSeqnoLease<T>> {
-        self.listen.handle.seqno_lease()
+    pub(crate) fn seqno_lease_returner(&self) -> ProgressSeqnoLeaseReturner<T> {
+        self.listen.handle.seqno_lease_returner()
     }
 }
 
@@ -650,8 +650,8 @@ where
     /// Returns a [`ProgressSeqnoLease`] tied to this [`ReadHandle`], allowing a
     /// caller to return leases without needing to mutably borrowing this
     /// `ReadHandle` directly.
-    pub(crate) fn seqno_lease(&self) -> Arc<ProgressSeqnoLease<T>> {
-        Arc::clone(&self.seqno_lease)
+    pub(crate) fn seqno_lease_returner(&self) -> ProgressSeqnoLeaseReturner<T> {
+        Arc::clone(&self.seqno_lease).returner()
     }
 
     /// Returns an independent [ReadHandle] with a new [LeasedReaderId] but the
