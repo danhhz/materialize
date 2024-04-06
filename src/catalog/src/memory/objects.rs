@@ -389,7 +389,7 @@ pub enum DataSourceDesc {
     /// Receives data from some other source
     Source,
     /// Receives introspection data from an internal system
-    Introspection(IntrospectionType),
+    Introspection(DataSourceIntrospectionDesc),
     /// Receives data from the source's reclocking/remapping operations.
     Progress,
     /// Receives data from HTTP requests.
@@ -403,6 +403,12 @@ pub enum DataSourceDesc {
         /// The cluster which this source is associated with.
         cluster_id: ClusterId,
     },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub enum DataSourceIntrospectionDesc {
+    Storage(IntrospectionType),
+    Catalog,
 }
 
 impl DataSourceDesc {

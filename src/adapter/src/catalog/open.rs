@@ -30,8 +30,8 @@ use mz_catalog::durable::{
 };
 use mz_catalog::memory::error::{Error, ErrorKind};
 use mz_catalog::memory::objects::{
-    CatalogEntry, CatalogItem, CommentsMap, DataSourceDesc, DefaultPrivileges, Func, Log, Source,
-    Table, Type,
+    CatalogEntry, CatalogItem, CommentsMap, DataSourceDesc, DataSourceIntrospectionDesc,
+    DefaultPrivileges, Func, Log, Source, Table, Type,
 };
 use mz_catalog::SYSTEM_CONN_ID;
 use mz_cluster_client::ReplicaId;
@@ -227,6 +227,7 @@ impl Catalog {
                     timestamp_interval: Duration::from_secs(1),
                     now: config.now.clone(),
                     connection_context: config.connection_context,
+                    shard_id: storage.shard_id(),
                 },
                 cluster_replica_sizes: config.cluster_replica_sizes,
                 availability_zones: config.availability_zones,
@@ -451,7 +452,33 @@ impl Catalog {
                                 name.clone(),
                                 CatalogItem::Source(Source {
                                     create_sql: None,
-                                    data_source: DataSourceDesc::Introspection(coll.data_source),
+                                    data_source: DataSourceDesc::Introspection(DataSourceIntrospectionDesc::Storage(coll.data_source)),
+                                    desc: coll.desc.clone(),
+                                    timeline: Timeline::EpochMilliseconds,
+                                    resolved_ids: ResolvedIds(BTreeSet::new()),
+                                    custom_logical_compaction_window: coll
+                                        .is_retained_metrics_object
+                                        .then(|| state.system_config().metrics_retention().try_into().expect("invalid metrics retention")),
+                                    is_retained_metrics_object: coll.is_retained_metrics_object,
+                                }),
+                                MZ_SYSTEM_ROLE_ID,
+                                PrivilegeMap::from_mz_acl_items(acl_items),
+                            );
+                        }
+                        Builtin::Catalog(coll) => {
+                            let mut acl_items = vec![rbac::owner_privilege(
+                                mz_sql::catalog::ObjectType::Source,
+                                MZ_SYSTEM_ROLE_ID,
+                            )];
+                            acl_items.extend_from_slice(&coll.access);
+
+                            state.insert_item(
+                                id,
+                                coll.oid,
+                                name.clone(),
+                                CatalogItem::Source(Source {
+                                    create_sql: None,
+                                    data_source: DataSourceDesc::Introspection(DataSourceIntrospectionDesc::Catalog),
                                     desc: coll.desc.clone(),
                                     timeline: Timeline::EpochMilliseconds,
                                     resolved_ids: ResolvedIds(BTreeSet::new()),
@@ -588,7 +615,8 @@ impl Catalog {
                     | Builtin::View(_)
                     | Builtin::Type(_)
                     | Builtin::Func(_)
-                    | Builtin::Source(_) => {
+                    | Builtin::Source(_)
+                    | Builtin::Catalog(_) => {
                         unreachable!("handled above")
                     }
                 }

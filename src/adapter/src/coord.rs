@@ -88,7 +88,9 @@ use mz_adapter_types::compaction::{CompactionWindow, ReadCapability};
 use mz_adapter_types::connection::ConnectionId;
 use mz_build_info::BuildInfo;
 use mz_catalog::config::{AwsPrincipalContext, ClusterReplicaSizeMap};
-use mz_catalog::memory::objects::{CatalogEntry, CatalogItem, Connection, DataSourceDesc, Source};
+use mz_catalog::memory::objects::{
+    CatalogEntry, CatalogItem, Connection, DataSourceDesc, DataSourceIntrospectionDesc, Source,
+};
 use mz_cloud_resources::{CloudResourceController, VpcEndpointConfig, VpcEndpointEvent};
 use mz_compute_client::controller::error::InstanceMissing;
 use mz_compute_types::dataflows::DataflowDescription;
@@ -1947,9 +1949,13 @@ impl Coordinator {
                     (DataSource::Webhook, Some(source_status_collection_id))
                 }
                 DataSourceDesc::Progress => (DataSource::Progress, None),
-                DataSourceDesc::Introspection(introspection) => {
-                    (DataSource::Introspection(*introspection), None)
-                }
+                DataSourceDesc::Introspection(DataSourceIntrospectionDesc::Storage(
+                    introspection,
+                )) => (DataSource::Introspection(*introspection), None),
+                DataSourceDesc::Introspection(DataSourceIntrospectionDesc::Catalog) => (
+                    DataSource::Other(DataSourceOther::Shard(catalog.state().config().shard_id)),
+                    None,
+                ),
             };
             CollectionDescription {
                 desc: source.desc.clone(),

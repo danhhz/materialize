@@ -66,6 +66,7 @@ pub enum Builtin<T: 'static + TypeReference> {
     Type(&'static BuiltinType<T>),
     Func(BuiltinFunc),
     Source(&'static BuiltinSource),
+    Catalog(&'static BuiltinCatalog),
     Index(&'static BuiltinIndex),
 }
 
@@ -78,6 +79,7 @@ impl<T: TypeReference> Builtin<T> {
             Builtin::Type(typ) => typ.name,
             Builtin::Func(func) => func.name,
             Builtin::Source(coll) => coll.name,
+            Builtin::Catalog(coll) => coll.name,
             Builtin::Index(index) => index.name,
         }
     }
@@ -90,6 +92,7 @@ impl<T: TypeReference> Builtin<T> {
             Builtin::Type(typ) => typ.schema,
             Builtin::Func(func) => func.schema,
             Builtin::Source(coll) => coll.schema,
+            Builtin::Catalog(coll) => coll.schema,
             Builtin::Index(index) => index.schema,
         }
     }
@@ -98,6 +101,7 @@ impl<T: TypeReference> Builtin<T> {
         match self {
             Builtin::Log(_) => CatalogItemType::Source,
             Builtin::Source(_) => CatalogItemType::Source,
+            Builtin::Catalog(_) => CatalogItemType::Source,
             Builtin::Table(_) => CatalogItemType::Table,
             Builtin::View(_) => CatalogItemType::View,
             Builtin::Type(_) => CatalogItemType::Type,
@@ -137,6 +141,19 @@ pub struct BuiltinSource {
     pub oid: u32,
     pub desc: RelationDesc,
     pub data_source: IntrospectionType,
+    /// Whether the source's retention policy is controlled by
+    /// the system variable `METRICS_RETENTION`
+    pub is_retained_metrics_object: bool,
+    /// ACL items to apply to the object
+    pub access: Vec<MzAclItem>,
+}
+
+#[derive(Clone, Debug, Hash, Serialize)]
+pub struct BuiltinCatalog {
+    pub name: &'static str,
+    pub schema: &'static str,
+    pub oid: u32,
+    pub desc: RelationDesc,
     /// Whether the source's retention policy is controlled by
     /// the system variable `METRICS_RETENTION`
     pub is_retained_metrics_object: bool,
@@ -248,6 +265,7 @@ impl<T: TypeReference> Fingerprint for &Builtin<T> {
             Builtin::Type(typ) => typ.fingerprint(),
             Builtin::Func(func) => func.fingerprint(),
             Builtin::Source(coll) => coll.fingerprint(),
+            Builtin::Catalog(coll) => coll.fingerprint(),
             Builtin::Index(index) => index.fingerprint(),
         }
     }
@@ -303,6 +321,12 @@ impl Fingerprint for &BuiltinView {
 }
 
 impl Fingerprint for &BuiltinSource {
+    fn fingerprint(&self) -> String {
+        self.desc.fingerprint()
+    }
+}
+
+impl Fingerprint for &BuiltinCatalog {
     fn fingerprint(&self) -> String {
         self.desc.fingerprint()
     }
@@ -2008,6 +2032,15 @@ pub static MZ_COMPUTE_OPERATOR_HYDRATION_STATUSES_PER_WORKER: Lazy<BuiltinSource
         is_retained_metrics_object: false,
         access: vec![PUBLIC_SELECT],
     });
+
+pub static MZ_CATALOG_RAW: Lazy<BuiltinCatalog> = Lazy::new(|| BuiltinCatalog {
+    name: "mz_catalog_raw",
+    schema: MZ_INTERNAL_SCHEMA,
+    oid: oid::SOURCE_CATALOG_RAW_OID,
+    desc: crate::durable::persist::desc(),
+    is_retained_metrics_object: false,
+    access: vec![MONITOR_SELECT],
+});
 
 pub static MZ_DATABASES: Lazy<BuiltinTable> = Lazy::new(|| BuiltinTable {
     name: "mz_databases",
@@ -7109,6 +7142,7 @@ pub static BUILTINS_STATIC: Lazy<Vec<Builtin<NameReference>>> = Lazy::new(|| {
         Builtin::Source(&MZ_COMPUTE_DEPENDENCIES),
         Builtin::Source(&MZ_COMPUTE_HYDRATION_STATUSES),
         Builtin::Source(&MZ_COMPUTE_OPERATOR_HYDRATION_STATUSES_PER_WORKER),
+        Builtin::Catalog(&MZ_CATALOG_RAW),
         Builtin::View(&MZ_HYDRATION_STATUSES),
         Builtin::View(&MZ_MATERIALIZATION_LAG),
         Builtin::View(&MZ_COMPUTE_ERROR_COUNTS_PER_WORKER),
