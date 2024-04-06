@@ -102,7 +102,7 @@ use mz_catalog::config::{AwsPrincipalContext, BuiltinItemMigrationConfig, Cluste
 use mz_catalog::durable::OpenableDurableCatalogState;
 use mz_catalog::memory::objects::{
     CatalogEntry, CatalogItem, ClusterReplicaProcessStatus, ClusterVariantManaged, Connection,
-    DataSourceDesc, TableDataSource,
+    DataSourceDesc, DataSourceIntrospectionDesc, TableDataSource,
 };
 use mz_cloud_resources::{CloudResourceController, VpcEndpointConfig, VpcEndpointEvent};
 use mz_compute_client::controller::error::InstanceMissing;
@@ -2404,6 +2404,7 @@ impl Coordinator {
         migrated_storage_collections: &BTreeSet<GlobalId>,
     ) {
         let catalog = self.catalog();
+        let catalog_shard_id = catalog.catalog_shard_id().await;
         let source_status_collection_id = catalog
             .resolve_builtin_storage_collection(&mz_catalog::builtin::MZ_SOURCE_STATUS_HISTORY);
 
@@ -2447,9 +2448,13 @@ impl Coordinator {
                     (DataSource::Webhook, Some(source_status_collection_id))
                 }
                 DataSourceDesc::Progress => (DataSource::Progress, None),
-                DataSourceDesc::Introspection(introspection) => {
-                    (DataSource::Introspection(introspection), None)
-                }
+                DataSourceDesc::Introspection(DataSourceIntrospectionDesc::Storage(
+                    introspection,
+                )) => (DataSource::Introspection(introspection), None),
+                DataSourceDesc::Introspection(DataSourceIntrospectionDesc::Catalog) => (
+                    DataSource::Other(DataSourceOther::Shard(catalog_shard_id)),
+                    None,
+                ),
             };
             CollectionDescription {
                 desc: desc.clone(),

@@ -41,6 +41,7 @@ use mz_ore::option::FallibleMapExt;
 use mz_ore::result::ResultExt as _;
 use mz_ore::{soft_assert_eq_or_log, soft_assert_or_log};
 use mz_persist_client::PersistClient;
+use mz_persist_types::ShardId;
 use mz_repr::adt::mz_acl_item::{AclMode, PrivilegeMap};
 use mz_repr::explain::ExprHumanizer;
 use mz_repr::namespaces::MZ_TEMP_SCHEMA;
@@ -1275,6 +1276,11 @@ impl Catalog {
         let updates = self.storage().await.sync_to_current_updates().await?;
         let builtin_table_updates = self.state.apply_updates(updates)?;
         Ok(builtin_table_updates)
+    }
+
+    /// Returns the shard id of the catalog itself.
+    pub async fn catalog_shard_id(&self) -> ShardId {
+        self.storage().await.shard_id()
     }
 }
 

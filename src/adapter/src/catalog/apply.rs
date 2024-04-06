@@ -28,9 +28,9 @@ use mz_catalog::durable::objects::{
 use mz_catalog::durable::{CatalogError, DurableCatalogError};
 use mz_catalog::memory::error::{Error, ErrorKind};
 use mz_catalog::memory::objects::{
-    CatalogEntry, CatalogItem, Cluster, ClusterReplica, DataSourceDesc, Database, Func, Index, Log,
-    Role, Schema, Source, StateDiff, StateUpdate, StateUpdateKind, Table, TableDataSource,
-    TemporaryItem, Type, UpdateFrom,
+    CatalogEntry, CatalogItem, Cluster, ClusterReplica, DataSourceDesc,
+    DataSourceIntrospectionDesc, Database, Func, Index, Log, Role, Schema, Source, StateDiff,
+    StateUpdate, StateUpdateKind, Table, TableDataSource, TemporaryItem, Type, UpdateFrom,
 };
 use mz_catalog::SYSTEM_CONN_ID;
 use mz_compute_client::controller::ComputeReplicaConfig;
@@ -715,7 +715,42 @@ impl CatalogState {
                     name.clone(),
                     CatalogItem::Source(Source {
                         create_sql: None,
-                        data_source: DataSourceDesc::Introspection(coll.data_source),
+                        data_source: DataSourceDesc::Introspection(
+                            DataSourceIntrospectionDesc::Storage(coll.data_source),
+                        ),
+                        desc: coll.desc.clone(),
+                        timeline: Timeline::EpochMilliseconds,
+                        resolved_ids: ResolvedIds(BTreeSet::new()),
+                        custom_logical_compaction_window: coll.is_retained_metrics_object.then(
+                            || {
+                                self.system_config()
+                                    .metrics_retention()
+                                    .try_into()
+                                    .expect("invalid metrics retention")
+                            },
+                        ),
+                        is_retained_metrics_object: coll.is_retained_metrics_object,
+                    }),
+                    MZ_SYSTEM_ROLE_ID,
+                    PrivilegeMap::from_mz_acl_items(acl_items),
+                );
+            }
+            Builtin::Catalog(coll) => {
+                let mut acl_items = vec![rbac::owner_privilege(
+                    mz_sql::catalog::ObjectType::Source,
+                    MZ_SYSTEM_ROLE_ID,
+                )];
+                acl_items.extend_from_slice(&coll.access);
+
+                self.insert_item(
+                    id,
+                    coll.oid,
+                    name.clone(),
+                    CatalogItem::Source(Source {
+                        create_sql: None,
+                        data_source: DataSourceDesc::Introspection(
+                            DataSourceIntrospectionDesc::Catalog,
+                        ),
                         desc: coll.desc.clone(),
                         timeline: Timeline::EpochMilliseconds,
                         resolved_ids: ResolvedIds(BTreeSet::new()),

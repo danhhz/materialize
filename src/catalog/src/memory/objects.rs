@@ -568,6 +568,12 @@ pub enum TableDataSource {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub enum DataSourceIntrospectionDesc {
+    Storage(IntrospectionType),
+    Catalog,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub enum DataSourceDesc {
     /// Receives data from an external system
     Ingestion {
@@ -588,7 +594,7 @@ pub enum DataSourceDesc {
         data_config: SourceExportDataConfig<ReferencedConnection>,
     },
     /// Receives introspection data from an internal system
-    Introspection(IntrospectionType),
+    Introspection(DataSourceIntrospectionDesc),
     /// Receives data from the source's reclocking/remapping operations.
     Progress,
     /// Receives data from HTTP requests.

@@ -32,8 +32,8 @@ use mz_catalog::durable::{
 };
 use mz_catalog::memory::error::{Error, ErrorKind};
 use mz_catalog::memory::objects::{
-    BootstrapStateUpdateKind, CatalogEntry, CatalogItem, CommentsMap, DefaultPrivileges,
-    StateUpdate,
+    BootstrapStateUpdateKind, CatalogEntry, CatalogItem, CommentsMap, DataSourceDesc,
+    DataSourceIntrospectionDesc, DefaultPrivileges, StateUpdate,
 };
 use mz_catalog::SYSTEM_CONN_ID;
 use mz_cluster_client::ReplicaId;
@@ -509,6 +509,7 @@ impl Catalog {
         storage_controller: &mut dyn StorageController<Timestamp = mz_repr::Timestamp>,
         storage_collections_to_drop: BTreeSet<GlobalId>,
     ) -> Result<(), mz_catalog::durable::CatalogError> {
+        let catalog_shard_id = self.catalog_shard_id().await;
         let collections = self
             .entries()
             .filter(|entry| entry.item().is_storage_collection())
@@ -521,6 +522,31 @@ impl Catalog {
 
         let mut storage = self.storage().await;
         let mut txn = storage.transaction().await?;
+
+        // WIP we communicate to the storage controller that the mz_catalog_raw
+        // collection already has a shard_id (that it can reuse as an
+        // optimization instead of needlessly copying it), but this happens much
+        // later in create_collections and we invent and write down the shard
+        // ids here. figure out how we want to model this
+        for e in self.entries() {
+            let shard_id = match &e.item {
+                CatalogItem::Source(x) => match x.data_source {
+                    DataSourceDesc::Introspection(DataSourceIntrospectionDesc::Catalog) => {
+                        catalog_shard_id
+                    }
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            use mz_storage_client::controller::StorageTxn;
+            match txn.get_collection_metadata().get(&e.id()) {
+                Some(x) => assert_eq!(x, &shard_id),
+                None => {
+                    txn.insert_collection_metadata([(e.id(), shard_id)].into())
+                        .map_err(mz_catalog::durable::DurableCatalogError::from)?;
+                }
+            }
+        }
 
         storage_controller
             .initialize_state(&mut txn, collections, storage_collections_to_drop)
