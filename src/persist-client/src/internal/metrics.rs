@@ -10,11 +10,13 @@
 //! Prometheus monitoring metrics.
 
 use async_stream::stream;
+use mz_dyncfg::ConfigSet;
 use mz_persist_types::stats::PartStatsMetrics;
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
-use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -41,7 +43,7 @@ use prometheus::proto::MetricFamily;
 use prometheus::{CounterVec, Gauge, GaugeVec, Histogram, HistogramVec, IntCounterVec};
 use timely::progress::Antichain;
 use tokio_metrics::TaskMonitor;
-use tracing::{debug, error, info, info_span, Instrument};
+use tracing::{debug, error, info_span, Instrument};
 
 use crate::fetch::{FETCH_SEMAPHORE_COST_ADJUSTMENT, FETCH_SEMAPHORE_PERMIT_ADJUSTMENT};
 use crate::internal::paths::BlobKey;
@@ -164,7 +166,7 @@ impl Metrics {
             tasks: TasksMetrics::new(registry),
             columnar,
             inline: InlineMetrics::new(registry),
-            semaphore: SemaphoreMetrics::new(cfg.clone(), registry.clone()),
+            semaphore: SemaphoreMetrics::new(cfg.clone(), registry),
             sink: SinkMetrics::new(registry),
             s3_blob,
             postgres_consensus: PostgresClientMetrics::new(registry, "mz_persist"),
@@ -2424,59 +2426,39 @@ impl BlobMemCache {
 
 #[derive(Debug)]
 pub struct SemaphoreMetrics {
-    cfg: PersistConfig,
-    registry: MetricsRegistry,
-    fetch: OnceCell<MetricsSemaphore>,
+    dyncfgs: ConfigSet,
+    fetch: MetricsSemaphore,
 }
 
 impl SemaphoreMetrics {
-    fn new(cfg: PersistConfig, registry: MetricsRegistry) -> Self {
-        SemaphoreMetrics {
-            cfg,
-            registry,
-            fetch: OnceCell::new(),
-        }
-    }
-
-    /// We can't easily change the number of permits, and the dyncfgs are all
-    /// set to defaults on process start, so make sure we only initialize the
-    /// semaphore once we've synced dyncfgs at least once.
-    async fn fetch(&self) -> &MetricsSemaphore {
-        if let Some(x) = self.fetch.get() {
-            // Common case of already initialized avoids the cloning below.
-            return x;
-        }
-        let cfg = self.cfg.clone();
-        let registry = self.registry.clone();
-        let init = async move {
-            let total_permits = match cfg.announce_memory_limit {
+    fn new(cfg: PersistConfig, registry: &MetricsRegistry) -> Self {
+        let dyncfgs = cfg.configs.clone();
+        let fetch_permits_fn = move || {
+            match cfg.announce_memory_limit {
                 // Non-cc replicas have the old physical flow control mechanism,
                 // so only apply this one on cc replicas.
-                Some(mem) if cfg.is_cc_active => {
-                    // We can't easily adjust the number of permits later, so
-                    // make sure we've synced dyncfg values at least once.
-                    info!("fetch semaphore awaiting first dyncfg values");
-                    let () = cfg.configs_synced_once().await;
-                    let total_permits = usize::cast_lossy(
-                        f64::cast_lossy(mem) * FETCH_SEMAPHORE_PERMIT_ADJUSTMENT.get(&cfg),
-                    );
-                    info!("fetch_semaphore got first dyncfg values");
-                    total_permits
-                }
+                Some(mem) if cfg.is_cc_active => usize::cast_lossy(
+                    f64::cast_lossy(mem) * FETCH_SEMAPHORE_PERMIT_ADJUSTMENT.get(&cfg),
+                ),
                 Some(_) | None => Semaphore::MAX_PERMITS,
-            };
-            MetricsSemaphore::new(&registry, "fetch", total_permits)
+            }
         };
-        self.fetch.get_or_init(|| init).await
+        let fetch = MetricsSemaphore::new(registry, "fetch");
+        // NB: Resizing up (here from 0) takes effect instantly.
+        fetch.resize_permits(fetch_permits_fn());
+        // WIP continue to update the number of permits, either when
+        // requesting new permits or when dyncfgs change
+        SemaphoreMetrics { dyncfgs, fetch }
     }
 
     pub(crate) async fn acquire_fetch_permits(&self, encoded_size_bytes: usize) -> MetricsPermits {
         // Adjust the requested permits to account for the difference between
         // encoded_size_bytes and the decoded size in lgalloc.
         let requested_permits = f64::cast_lossy(encoded_size_bytes);
-        let requested_permits = requested_permits * FETCH_SEMAPHORE_COST_ADJUSTMENT.get(&self.cfg);
+        let requested_permits =
+            requested_permits * FETCH_SEMAPHORE_COST_ADJUSTMENT.get(&self.dyncfgs);
         let requested_permits = usize::cast_lossy(requested_permits);
-        self.fetch().await.acquire_permits(requested_permits).await
+        self.fetch.acquire_permits(requested_permits).await
     }
 }
 
@@ -2484,7 +2466,7 @@ impl SemaphoreMetrics {
 pub struct MetricsSemaphore {
     name: &'static str,
     semaphore: Arc<Semaphore>,
-    total_permits: usize,
+    total_permits: AtomicUsize,
     acquire_count: IntCounter,
     blocking_count: IntCounter,
     blocking_seconds: Counter,
@@ -2494,14 +2476,11 @@ pub struct MetricsSemaphore {
 }
 
 impl MetricsSemaphore {
-    pub fn new(registry: &MetricsRegistry, name: &'static str, total_permits: usize) -> Self {
-        let total_permits = std::cmp::min(total_permits, Semaphore::MAX_PERMITS);
-        // TODO: Sadly, tokio::sync::Semaphore makes it difficult to have a
-        // dynamic total_permits count.
-        let semaphore = Arc::new(Semaphore::new(total_permits));
+    pub fn new(registry: &MetricsRegistry, name: &'static str) -> Self {
+        let semaphore = Arc::new(Semaphore::new(0));
         MetricsSemaphore {
             name,
-            total_permits,
+            total_permits: AtomicUsize::new(0),
             acquire_count: registry.register(metric!(
                 name: "mz_persist_semaphore_acquire_count",
                 help: "count of acquire calls (not acquired permits count)",
@@ -2541,10 +2520,45 @@ impl MetricsSemaphore {
         }
     }
 
+    pub fn resize_permits(&self, total_permits: usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        // WIP metrics on resizes
+        let total_permits = std::cmp::min(total_permits, Semaphore::MAX_PERMITS);
+        let old_permits = self.total_permits.swap(total_permits, SeqCst);
+        if total_permits > old_permits {
+            self.semaphore.add_permits(total_permits - old_permits);
+        } else if old_permits > total_permits {
+            let semaphore = Arc::clone(&self.semaphore);
+            let _ = mz_ore::task::spawn(
+                || format!("{}_semaphore::forget_permits", self.name),
+                async move {
+                    // WIP This loop could end up executing quite a few times if
+                    // forget_permits is much larger than fits in a u32
+                    let mut forget_permits = old_permits - total_permits;
+                    while forget_permits > 0 {
+                        let diff = u32::try_from(forget_permits).unwrap_or(u32::MAX);
+                        forget_permits -= usize::cast_from(diff);
+                        match semaphore.acquire_many(diff).await {
+                            Ok(permits) => permits.forget(),
+                            Err(err) => todo!("{}", err),
+                        };
+                    }
+                },
+            );
+        }
+        // Else equal: no-op
+    }
+
     pub async fn acquire_permits(&self, requested_permits: usize) -> MetricsPermits {
+        use std::sync::atomic::Ordering::SeqCst;
         // HACK: Cap the request at the total permit count. This prevents
         // deadlock, even if the cfg gets set to some small value.
-        let total_permits = u32::try_from(self.total_permits).unwrap_or(u32::MAX);
+        //
+        // WIP There's a race condition here between self.total_permits getting
+        // changed and the new number of permits being realized in the
+        // semaphore. Definitely seems like there are some orderings that could
+        // lead to deadlock
+        let total_permits = u32::try_from(self.total_permits.load(SeqCst)).unwrap_or(u32::MAX);
         let requested_permits = u32::try_from(requested_permits).unwrap_or(u32::MAX);
         let requested_permits = std::cmp::min(requested_permits, total_permits);
         let wrap = |_permit| {
