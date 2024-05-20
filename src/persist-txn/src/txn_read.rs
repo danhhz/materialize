@@ -306,6 +306,30 @@ pub struct DataRemapEntry<T> {
 #[derive(Debug)]
 pub(crate) struct DataSubscribeBlocked<T>(pub(crate) DataSnapshot<T>);
 
+#[async_trait::async_trait]
+trait UnblockSubscribe<T>: Debug + Send {
+    async fn unblock_subscribe(
+        self: Box<Self>,
+        subscribe: DataSubscribeBlocked<T>,
+    ) -> Option<DataSubscribe<T>>;
+}
+
+#[async_trait::async_trait]
+impl<K, V, T, D> UnblockSubscribe<T> for WriteHandle<K, V, T, D>
+where
+    K: Debug + Codec + Send + Sync,
+    V: Debug + Codec + Send + Sync,
+    T: Timestamp + Lattice + TotalOrder + StepForward + Codec64,
+    D: Semigroup + Codec64 + Send + Sync,
+{
+    async fn unblock_subscribe(
+        self: Box<Self>,
+        subscribe: DataSubscribeBlocked<T>,
+    ) -> Option<DataSubscribe<T>> {
+        subscribe.unblock_subscribe(*self).await
+    }
+}
+
 /// A token that keeps track of a [`DataRemapEntry`] for shard `data_id`.
 #[derive(Debug)]
 pub(crate) struct DataSubscribe<T> {
@@ -487,6 +511,12 @@ enum TxnsReadCmd<T> {
         as_of: T,
         tx: oneshot::Sender<DataSnapshot<T>>,
     },
+    DataSubscribe {
+        data_id: ShardId,
+        as_of: T,
+        unblock: Box<dyn UnblockSubscribe<T>>,
+        tx: oneshot::Sender<Option<DataSubscribe<T>>>,
+    },
     Wait {
         id: Uuid,
         ts: WaitTs<T>,
@@ -662,6 +692,16 @@ where
                 }
                 TxnsReadCmd::DataSnapshot { data_id, as_of, tx } => {
                     let res = self.cache.data_snapshot(data_id, as_of.clone());
+                    let _ = tx.send(res);
+                }
+                TxnsReadCmd::DataSubscribe {
+                    data_id,
+                    as_of,
+                    unblock,
+                    tx,
+                } => {
+                    let res = self.cache.data_subscribe(data_id, as_of.clone());
+                    let res = unblock.unblock_subscribe(res).await;
                     let _ = tx.send(res);
                 }
                 TxnsReadCmd::Wait { id, ts, tx } => {

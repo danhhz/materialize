@@ -186,7 +186,7 @@ where
         let mut txns_cache = TxnsCache::<T, C>::open(&client, txns_id, Some(data_id)).await;
 
         let _ = txns_cache.update_gt(&as_of).await;
-        let subscribe = txns_cache.data_subscribe::<K, V, D>(data_id, as_of.clone());
+        let subscribe = txns_cache.data_subscribe(data_id, as_of.clone());
         let data_write = client
             .open_writer::<K, V, T, D>(
                 data_id,
