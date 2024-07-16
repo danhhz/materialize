@@ -9,7 +9,7 @@
 
 //! A cache of the txn shard contents.
 
-use std::cmp::{max, min};
+use std::cmp::{max, min, Reverse};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Debug;
 use std::ops::{Deref, DerefMut};
@@ -462,7 +462,10 @@ impl<T: Timestamp + Lattice + TotalOrder + StepForward + Codec64> TxnsCacheState
         // which is not what we want. If we ever expose an interface for
         // registering and committing to a data shard at the same
         // timestamp, this will also have to sort registrations first.
-        entries.sort_by(|(a, _, _), (b, _, _)| a.ts::<T>().cmp(&b.ts::<T>()));
+        entries.sort_by(|(a, _, a_d), (b, _, b_d)| {
+            (a.ts::<T>(), Reverse(a_d)).cmp(&(b.ts::<T>(), Reverse(b_d)))
+        });
+        tracing::info!("WIP entries: {:?}", entries);
         for (e, t, d) in entries {
             match e {
                 TxnsEntry::Register(data_id, ts) => {
@@ -519,6 +522,19 @@ impl<T: Timestamp + Lattice + TotalOrder + StepForward + Codec64> TxnsCacheState
                 data_id.to_string(),
                 ts
             );
+            let active_reg = self
+                .datas
+                .get(&data_id)
+                .and_then(|x| x.registered.back())
+                .expect("data shard should be registered before forget");
+            if active_reg.forget_ts.is_some() {
+                tracing::info!(
+                    "WIP ts={:?} active_reg={:?}\n    self={:?}",
+                    ts,
+                    active_reg,
+                    self
+                );
+            }
             let active_reg = self
                 .datas
                 .get_mut(&data_id)

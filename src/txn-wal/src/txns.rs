@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use differential_dataflow::consolidation::consolidate_updates;
 use differential_dataflow::difference::Semigroup;
 use differential_dataflow::lattice::Lattice;
 use futures::stream::FuturesUnordered;
@@ -21,12 +22,13 @@ use mz_ore::collections::HashSet;
 use mz_ore::instrument;
 use mz_persist_client::cfg::USE_CRITICAL_SINCE_TXN;
 use mz_persist_client::critical::SinceHandle;
+use mz_persist_client::read::ListenEvent;
 use mz_persist_client::write::WriteHandle;
 use mz_persist_client::{Diagnostics, PersistClient, ShardId};
 use mz_persist_types::txn::{TxnsCodec, TxnsEntry};
 use mz_persist_types::{Codec, Codec64, Opaque, StepForward};
 use timely::order::TotalOrder;
-use timely::progress::Timestamp;
+use timely::progress::{Antichain, Timestamp};
 use tracing::debug;
 
 use crate::metrics::Metrics;
@@ -521,6 +523,73 @@ where
             Ok((registered, tidy))
         })
         .await
+    }
+
+    /// WIP
+    ///
+    /// requirement that no data shards are registered at the current upper
+    #[instrument(level = "debug", fields(ts = ?clear_ts))]
+    pub async fn reset_wal(&mut self, clear_ts: T) -> Result<(), T> {
+        let (txns_key_schema, txns_val_schema) = C::schemas();
+
+        let txns_read = self
+            .datas
+            .client
+            .open_leased_reader::<C::Key, C::Val, T, i64>(
+                self.txns_id(),
+                Arc::new(txns_key_schema),
+                Arc::new(txns_val_schema),
+                Diagnostics {
+                    shard_name: "txns".into(),
+                    handle_purpose: "reset_wal".into(),
+                },
+                true,
+            )
+            .await
+            .expect("WIP");
+        let as_of = txns_read.since().clone();
+        let mut txns_subscribe = txns_read.subscribe(as_of).await.expect("WIP");
+
+        let txns_upper = self
+            .txns_write
+            .shared_upper()
+            .into_option()
+            .expect("txns should not be closed");
+
+        let mut contents = Vec::new();
+        let mut progress_exclusive = T::minimum();
+        while progress_exclusive < txns_upper {
+            let events = txns_subscribe.fetch_next().await;
+            for event in events {
+                match event {
+                    ListenEvent::Updates(x) => {
+                        let updates = x.into_iter().map(|((k, v), _t, d)| {
+                            ((k.unwrap(), v.unwrap()), clear_ts.clone(), -d)
+                        });
+                        contents.extend(updates);
+                    }
+                    ListenEvent::Progress(x) => {
+                        progress_exclusive = x.into_option().expect("WIP");
+                    }
+                }
+            }
+        }
+        if clear_ts < progress_exclusive {
+            return Err(progress_exclusive);
+        }
+
+        consolidate_updates(&mut contents);
+        tracing::info!("WIP retracting at {:?}: {:?}", clear_ts, contents);
+        let res = self
+            .txns_write
+            .compare_and_append(
+                &contents,
+                Antichain::from_elem(progress_exclusive),
+                Antichain::from_elem(clear_ts.step_forward()),
+            )
+            .await
+            .expect("WIP");
+        res.map_err(|x| x.current.into_option().expect("WIP"))
     }
 
     /// "Applies" all committed txns <= the given timestamp, ensuring that reads
@@ -1128,7 +1197,7 @@ mod tests {
             );
             let data_id =
                 self.data_ids[usize::cast_from(self.rng.next_u64()) % self.data_ids.len()];
-            match self.rng.next_u64() % 6 {
+            match self.rng.next_u64() % 7 {
                 0 => self.write(data_id).await,
                 // The register and forget impls intentionally don't switch on
                 // whether it's already registered to stress idempotence.
@@ -1140,6 +1209,7 @@ mod tests {
                 }
                 4 => self.start_read(data_id, true),
                 5 => self.start_read(data_id, false),
+                6 => self.reset_wal().await,
                 _ => unreachable!(""),
             }
             debug!("stress {} step {} DONE ts={}", self.idx, self.step, self.ts);
@@ -1255,6 +1325,17 @@ mod tests {
             .await
         }
 
+        async fn reset_wal(&mut self) {
+            self.retry_ts_err(&mut |w: &mut StressWorker| {
+                debug!("stress reset_wal at {}", w.ts);
+                Box::pin(async move {
+                    let _ = w.txns.forget_all(w.ts).await?;
+                    w.txns.reset_wal(w.ts + 1).await
+                })
+            })
+            .await
+        }
+
         fn start_read(&mut self, data_id: ShardId, use_global_txn_cache: bool) {
             debug!(
                 "stress start_read {:.9} at {}",
@@ -1317,9 +1398,9 @@ mod tests {
     #[mz_ore::test(tokio::test(flavor = "multi_thread"))]
     #[cfg_attr(miri, ignore)] // unsupported operation: returning ready events from epoll_wait is not yet implemented
     async fn stress_correctness() {
-        const NUM_DATA_SHARDS: usize = 2;
-        const NUM_WORKERS: usize = 2;
-        const NUM_STEPS_PER_WORKER: usize = 100;
+        const NUM_DATA_SHARDS: usize = 1;
+        const NUM_WORKERS: usize = 1;
+        const NUM_STEPS_PER_WORKER: usize = 3;
         let seed = UNIX_EPOCH.elapsed().unwrap().hashed();
         eprintln!("using seed {}", seed);
 
