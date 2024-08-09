@@ -483,12 +483,7 @@ impl UntrimmableColumns {
 /// A builder for [Batches](Batch) that allows adding updates piece by piece and
 /// then finishing it.
 #[derive(Debug)]
-pub struct BatchBuilder<K, V, T, D>
-where
-    K: Codec,
-    V: Codec,
-    T: Timestamp + Lattice + Codec64,
-{
+pub struct BatchBuilder<K: Codec, V: Codec, T, D> {
     // TODO: Merge BatchBuilderInternal back into BatchBuilder once we no longer
     // need this separate schemas nonsense for compaction.
     //
@@ -563,12 +558,7 @@ where
 }
 
 #[derive(Debug)]
-pub(crate) struct BatchBuilderInternal<K, V, T, D>
-where
-    K: Codec,
-    V: Codec,
-    T: Timestamp + Lattice + Codec64,
-{
+pub(crate) struct BatchBuilderInternal<K: Codec, V: Codec, T, D> {
     lower: Antichain<T>,
     inclusive_upper: Antichain<Reverse<T>>,
 

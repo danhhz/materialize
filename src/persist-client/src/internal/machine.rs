@@ -2405,34 +2405,41 @@ pub mod tests {
                 .await;
             // Flush this batch out so the CaA doesn't get inline writes
             // backpressure.
-            let cfg = BatchBuilderConfig::new(&client.cfg, &write.writer_id);
+            let cfg = BatchBuilderConfig::new(&client.cfg, &write.as_impl().writer_id);
             batch
                 .flush_to_blob(
                     &cfg,
                     &client.metrics.user,
                     &client.isolated_runtime,
-                    &write.schemas,
+                    &write.as_impl().schemas,
                 )
                 .await;
             let (_, writer_maintenance) = write
+                .as_impl()
                 .machine
+                .clone()
                 .compare_and_append(
                     &batch.into_hollow_batch(),
-                    &write.writer_id,
+                    &write.as_impl().writer_id,
                     &HandleDebugState::default(),
-                    (write.cfg.now)(),
+                    (write.as_impl().cfg.now)(),
                 )
                 .await
                 .unwrap();
             writer_maintenance
-                .perform(&write.machine, &write.gc, write.compact.as_ref())
+                .perform(
+                    &write.as_impl().machine,
+                    &write.as_impl().gc,
+                    write.as_impl().compact.as_ref(),
+                )
                 .await;
         }
         let live_diffs = write
+            .as_impl()
             .machine
             .applier
             .state_versions
-            .fetch_all_live_diffs(&write.machine.shard_id())
+            .fetch_all_live_diffs(&write.as_impl().machine.shard_id())
             .await;
         // Make sure we constructed the key correctly.
         assert!(live_diffs.0.len() > 0);
@@ -2526,7 +2533,7 @@ pub mod tests {
 
         write1.expect_compare_and_append(&data[..1], 0, 2).await;
         // quick check: each handle should have its own copy of state
-        assert!(write1.machine.seqno() > write2.machine.seqno());
+        assert!(write1.as_impl().machine.seqno() > write2.as_impl().machine.seqno());
         // this handle's upper now lags behind. if compare_and_append fails to update
         // state after an upper mismatch then this call would (incorrectly) fail
         write2.expect_compare_and_append(&data[1..2], 2, 3).await;

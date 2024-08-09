@@ -9,10 +9,12 @@
 
 //! Write capabilities and handles
 
+use std::any::Any;
 use std::borrow::Borrow;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use differential_dataflow::difference::Semigroup;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::trace::Description;
@@ -91,6 +93,9 @@ impl WriterId {
     }
 }
 
+// WIP no
+pub use super::WriteHandle;
+
 /// A "capability" granting the ability to apply updates to some shard at times
 /// greater or equal to `self.upper()`.
 ///
@@ -107,7 +112,7 @@ impl WriterId {
 /// # };
 /// ```
 #[derive(Debug)]
-pub struct WriteHandle<K: Codec, V: Codec, T, D> {
+pub struct WriteHandleI<K: Codec, V: Codec, T, D> {
     pub(crate) cfg: PersistConfig,
     pub(crate) metrics: Arc<Metrics>,
     pub(crate) machine: Machine<K, V, T, D>,
@@ -123,60 +128,21 @@ pub struct WriteHandle<K: Codec, V: Codec, T, D> {
     expire_fn: Option<ExpireFn>,
 }
 
-impl<K, V, T, D> WriteHandle<K, V, T, D>
+#[async_trait]
+impl<K, V, T, D> WriteHandleT<K, V, T, D> for WriteHandleI<K, V, T, D>
 where
     K: Debug + Codec,
     V: Debug + Codec,
     T: Timestamp + Lattice + Codec64,
     D: Semigroup + Ord + Codec64 + Send + Sync,
 {
-    pub(crate) fn new(
-        cfg: PersistConfig,
-        metrics: Arc<Metrics>,
-        machine: Machine<K, V, T, D>,
-        gc: GarbageCollector<K, V, T, D>,
-        blob: Arc<dyn Blob>,
-        writer_id: WriterId,
-        purpose: &str,
-        schemas: Schemas<K, V>,
-    ) -> Self {
-        let isolated_runtime = Arc::clone(&machine.isolated_runtime);
-        let compact = cfg.compaction_enabled.then(|| {
-            Compactor::new(
-                cfg.clone(),
-                Arc::clone(&metrics),
-                Arc::clone(&isolated_runtime),
-                writer_id.clone(),
-                schemas.clone(),
-                gc.clone(),
-            )
-        });
-        let debug_state = HandleDebugState {
-            hostname: cfg.hostname.to_owned(),
-            purpose: purpose.to_owned(),
-        };
-        let upper = machine.applier.clone_upper();
-        let expire_fn = Self::expire_fn(machine.clone(), gc.clone(), writer_id.clone());
-        WriteHandle {
-            cfg,
-            metrics,
-            machine,
-            gc,
-            compact,
-            blob,
-            isolated_runtime,
-            writer_id,
-            debug_state,
-            schemas,
-            upper,
-            expire_fn: Some(expire_fn),
-        }
-    }
-
     /// Creates a [WriteHandle] for the same shard from an existing
     /// [ReadHandle].
-    pub fn from_read(read: &ReadHandle<K, V, T, D>, purpose: &str) -> Self {
-        Self::new(
+    fn from_read(
+        read: &ReadHandle<K, V, T, D>,
+        purpose: &str,
+    ) -> Box<dyn WriteHandleT<K, V, T, D>> {
+        Box::new(Self::new(
             read.cfg.clone(),
             Arc::clone(&read.metrics),
             read.machine.clone(),
@@ -185,16 +151,16 @@ where
             WriterId::new(),
             purpose,
             read.schemas.clone(),
-        )
+        ))
     }
 
     /// This handle's shard id.
-    pub fn shard_id(&self) -> ShardId {
+    fn shard_id(&self) -> ShardId {
         self.machine.shard_id()
     }
 
     /// Returns the schema of this writer.
-    pub fn schema_id(&self) -> Option<SchemaId> {
+    fn schema_id(&self) -> Option<SchemaId> {
         self.schemas.id
     }
 
@@ -204,7 +170,7 @@ where
     /// potentially more stale than [Self::shared_upper] but is lock-free and
     /// allocation-free. This will always be less or equal to the shard-global
     /// `upper`.
-    pub fn upper(&self) -> &Antichain<T> {
+    fn upper(&self) -> &Antichain<T> {
         &self.upper
     }
 
@@ -213,7 +179,7 @@ where
     /// This is the most recently known upper for this shard process-wide, but
     /// unlike [Self::upper] it requires a mutex and a clone. This will always be
     /// less or equal to the shard-global `upper`.
-    pub fn shared_upper(&self) -> Antichain<T> {
+    fn shared_upper(&self) -> Antichain<T> {
         self.machine.applier.clone_upper()
     }
 
@@ -223,7 +189,7 @@ where
     /// This requires fetching the latest state from consensus and is therefore a potentially
     /// expensive operation.
     #[instrument(level = "debug", fields(shard = %self.machine.shard_id()))]
-    pub async fn fetch_recent_upper(&mut self) -> &Antichain<T> {
+    async fn fetch_recent_upper(&mut self) -> &Antichain<T> {
         // TODO: Do we even need to track self.upper on WriteHandle or could
         // WriteHandle::upper just get the one out of machine?
         self.machine
@@ -231,118 +197,6 @@ where
             .fetch_upper(|current_upper| self.upper.clone_from(current_upper))
             .await;
         &self.upper
-    }
-
-    /// Applies `updates` to this shard and downgrades this handle's upper to
-    /// `upper`.
-    ///
-    /// The innermost `Result` is `Ok` if the updates were successfully written.
-    /// If not, an `Upper` err containing the current writer upper is returned.
-    /// If that happens, we also update our local `upper` to match the current
-    /// upper. This is useful in cases where a timeout happens in between a
-    /// successful write and returning that to the client.
-    ///
-    /// In contrast to [Self::compare_and_append], multiple [WriteHandle]s may
-    /// be used concurrently to write to the same shard, but in this case, the
-    /// data being written must be identical (in the sense of "definite"-ness).
-    /// It's intended for replicated use by source ingestion, sinks, etc.
-    ///
-    /// All times in `updates` must be greater or equal to `lower` and not
-    /// greater or equal to `upper`. A `upper` of the empty antichain "finishes"
-    /// this shard, promising that no more data is ever incoming.
-    ///
-    /// `updates` may be empty, which allows for downgrading `upper` to
-    /// communicate progress. It is possible to call this with `upper` equal to
-    /// `self.upper()` and an empty `updates` (making the call a no-op).
-    ///
-    /// This uses a bounded amount of memory, even when `updates` is very large.
-    /// Individual records, however, should be small enough that we can
-    /// reasonably chunk them up: O(KB) is definitely fine, O(MB) come talk to
-    /// us.
-    ///
-    /// The clunky multi-level Result is to enable more obvious error handling
-    /// in the caller. See <http://sled.rs/errors.html> for details.
-    #[instrument(level = "trace", fields(shard = %self.machine.shard_id()))]
-    pub async fn append<SB, KB, VB, TB, DB, I>(
-        &mut self,
-        updates: I,
-        lower: Antichain<T>,
-        upper: Antichain<T>,
-    ) -> Result<Result<(), UpperMismatch<T>>, InvalidUsage<T>>
-    where
-        SB: Borrow<((KB, VB), TB, DB)>,
-        KB: Borrow<K>,
-        VB: Borrow<V>,
-        TB: Borrow<T>,
-        DB: Borrow<D>,
-        I: IntoIterator<Item = SB>,
-        D: Send + Sync,
-    {
-        let batch = self.batch(updates, lower.clone(), upper.clone()).await?;
-        self.append_batch(batch, lower, upper).await
-    }
-
-    /// Applies `updates` to this shard and downgrades this handle's upper to
-    /// `new_upper` iff the current global upper of this shard is
-    /// `expected_upper`.
-    ///
-    /// The innermost `Result` is `Ok` if the updates were successfully written.
-    /// If not, an `Upper` err containing the current global upper is returned.
-    ///
-    /// In contrast to [Self::append], this linearizes mutations from all
-    /// writers. It's intended for use as an atomic primitive for timestamp
-    /// bindings, SQL tables, etc.
-    ///
-    /// All times in `updates` must be greater or equal to `expected_upper` and
-    /// not greater or equal to `new_upper`. A `new_upper` of the empty
-    /// antichain "finishes" this shard, promising that no more data is ever
-    /// incoming.
-    ///
-    /// `updates` may be empty, which allows for downgrading `upper` to
-    /// communicate progress. It is possible to heartbeat a writer lease by
-    /// calling this with `new_upper` equal to `self.upper()` and an empty
-    /// `updates` (making the call a no-op).
-    ///
-    /// This uses a bounded amount of memory, even when `updates` is very large.
-    /// Individual records, however, should be small enough that we can
-    /// reasonably chunk them up: O(KB) is definitely fine, O(MB) come talk to
-    /// us.
-    ///
-    /// The clunky multi-level Result is to enable more obvious error handling
-    /// in the caller. See <http://sled.rs/errors.html> for details.
-    #[instrument(level = "trace", fields(shard = %self.machine.shard_id()))]
-    pub async fn compare_and_append<SB, KB, VB, TB, DB, I>(
-        &mut self,
-        updates: I,
-        expected_upper: Antichain<T>,
-        new_upper: Antichain<T>,
-    ) -> Result<Result<(), UpperMismatch<T>>, InvalidUsage<T>>
-    where
-        SB: Borrow<((KB, VB), TB, DB)>,
-        KB: Borrow<K>,
-        VB: Borrow<V>,
-        TB: Borrow<T>,
-        DB: Borrow<D>,
-        I: IntoIterator<Item = SB>,
-        D: Send + Sync,
-    {
-        let mut batch = self
-            .batch(updates, expected_upper.clone(), new_upper.clone())
-            .await?;
-        match self
-            .compare_and_append_batch(&mut [&mut batch], expected_upper, new_upper)
-            .await
-        {
-            ok @ Ok(Ok(())) => ok,
-            err => {
-                // We cannot delete the batch in compare_and_append_batch()
-                // because the caller owns the batch and might want to retry
-                // with a different `expected_upper`. In this function, we
-                // control the batch, so we have to delete it.
-                batch.delete().await;
-                err
-            }
-        }
     }
 
     /// Appends the batch of updates to the shard and downgrades this handle's
@@ -371,7 +225,7 @@ where
     /// The clunky multi-level Result is to enable more obvious error handling
     /// in the caller. See <http://sled.rs/errors.html> for details.
     #[instrument(level = "trace", fields(shard = %self.machine.shard_id()))]
-    pub async fn append_batch(
+    async fn append_batch(
         &mut self,
         mut batch: Batch<K, V, T, D>,
         mut lower: Antichain<T>,
@@ -447,7 +301,7 @@ where
     /// The clunky multi-level Result is to enable more obvious error handling
     /// in the caller. See <http://sled.rs/errors.html> for details.
     #[instrument(level = "debug", fields(shard = %self.machine.shard_id()))]
-    pub async fn compare_and_append_batch(
+    async fn compare_and_append_batch(
         &mut self,
         batches: &mut [&mut Batch<K, V, T, D>],
         expected_upper: Antichain<T>,
@@ -568,7 +422,7 @@ where
 
     /// Turns the given [`ProtoBatch`] back into a [`Batch`] which can be used
     /// to append it to this shard.
-    pub fn batch_from_transmittable_batch(&self, batch: ProtoBatch) -> Batch<K, V, T, D> {
+    fn batch_from_transmittable_batch(&self, batch: ProtoBatch) -> Batch<K, V, T, D> {
         let shard_id: ShardId = batch
             .shard_id
             .into_rust()
@@ -603,7 +457,7 @@ where
     /// updates is very large. Individual records, however, should be small
     /// enough that we can reasonably chunk them up: O(KB) is definitely fine,
     /// O(MB) come talk to us.
-    pub fn builder(&mut self, lower: Antichain<T>) -> BatchBuilder<K, V, T, D> {
+    fn builder(&mut self, lower: Antichain<T>) -> BatchBuilder<K, V, T, D> {
         let builder = BatchBuilderInternal::new(
             BatchBuilderConfig::new(&self.cfg, &self.writer_id),
             Arc::clone(&self.metrics),
@@ -627,9 +481,219 @@ where
         }
     }
 
+    /// Blocks until the given `frontier` is less than the upper of the shard.
+    async fn wait_for_upper_past(&mut self, frontier: &Antichain<T>) {
+        let mut watch = self.machine.applier.watch();
+        let batch = self
+            .machine
+            .next_listen_batch(frontier, &mut watch, None, None)
+            .await;
+        if PartialOrder::less_than(&self.upper, batch.desc.upper()) {
+            self.upper.clone_from(batch.desc.upper());
+        }
+        assert!(PartialOrder::less_than(frontier, &self.upper));
+    }
+
+    /// Politely expires this writer, releasing any associated state.
+    ///
+    /// There is a best-effort impl in Drop to expire a writer that wasn't
+    /// explictly expired with this method. When possible, explicit expiry is
+    /// still preferred because the Drop one is best effort and is dependant on
+    /// a tokio [Handle] being available in the TLC at the time of drop (which
+    /// is a bit subtle). Also, explicit expiry allows for control over when it
+    /// happens.
+    #[instrument(level = "debug", fields(shard = %self.machine.shard_id()))]
+    async fn expire(mut self: Box<Self>) {
+        let Some(expire_fn) = self.expire_fn.take() else {
+            return;
+        };
+        expire_fn.0().await;
+    }
+
+    fn as_any(&self) -> &(dyn Any + Send + Sync + 'static) {
+        self
+    }
+}
+
+impl<K, V, T, D> WriteHandleI<K, V, T, D>
+where
+    K: Debug + Codec,
+    V: Debug + Codec,
+    T: Timestamp + Lattice + Codec64,
+    D: Semigroup + Ord + Codec64 + Send + Sync,
+{
+    pub(crate) fn new(
+        cfg: PersistConfig,
+        metrics: Arc<Metrics>,
+        machine: Machine<K, V, T, D>,
+        gc: GarbageCollector<K, V, T, D>,
+        blob: Arc<dyn Blob>,
+        writer_id: WriterId,
+        purpose: &str,
+        schemas: Schemas<K, V>,
+    ) -> Self {
+        let isolated_runtime = Arc::clone(&machine.isolated_runtime);
+        let compact = cfg.compaction_enabled.then(|| {
+            Compactor::new(
+                cfg.clone(),
+                Arc::clone(&metrics),
+                Arc::clone(&isolated_runtime),
+                writer_id.clone(),
+                schemas.clone(),
+                gc.clone(),
+            )
+        });
+        let debug_state = HandleDebugState {
+            hostname: cfg.hostname.to_owned(),
+            purpose: purpose.to_owned(),
+        };
+        let upper = machine.applier.clone_upper();
+        let expire_fn =
+            super::WriteHandle::expire_fn(machine.clone(), gc.clone(), writer_id.clone());
+        WriteHandleI {
+            cfg,
+            metrics,
+            machine,
+            gc,
+            compact,
+            blob,
+            isolated_runtime,
+            writer_id,
+            debug_state,
+            schemas,
+            upper,
+            expire_fn: Some(expire_fn),
+        }
+    }
+}
+
+impl<K, V, T, D> super::WriteHandle<K, V, T, D>
+where
+    K: Debug + Codec,
+    V: Debug + Codec,
+    T: Timestamp + Lattice + Codec64,
+    D: Semigroup + Ord + Codec64 + Send + Sync,
+{
+    #[cfg(test)]
+    pub(crate) fn as_impl(&self) -> &WriteHandleI<K, V, T, D> {
+        self.0.as_any().downcast_ref().expect("one impl")
+    }
+
+    /// Applies `updates` to this shard and downgrades this handle's upper to
+    /// `upper`.
+    ///
+    /// The innermost `Result` is `Ok` if the updates were successfully written.
+    /// If not, an `Upper` err containing the current writer upper is returned.
+    /// If that happens, we also update our local `upper` to match the current
+    /// upper. This is useful in cases where a timeout happens in between a
+    /// successful write and returning that to the client.
+    ///
+    /// In contrast to [Self::compare_and_append], multiple [WriteHandle]s may
+    /// be used concurrently to write to the same shard, but in this case, the
+    /// data being written must be identical (in the sense of "definite"-ness).
+    /// It's intended for replicated use by source ingestion, sinks, etc.
+    ///
+    /// All times in `updates` must be greater or equal to `lower` and not
+    /// greater or equal to `upper`. A `upper` of the empty antichain "finishes"
+    /// this shard, promising that no more data is ever incoming.
+    ///
+    /// `updates` may be empty, which allows for downgrading `upper` to
+    /// communicate progress. It is possible to call this with `upper` equal to
+    /// `self.upper()` and an empty `updates` (making the call a no-op).
+    ///
+    /// This uses a bounded amount of memory, even when `updates` is very large.
+    /// Individual records, however, should be small enough that we can
+    /// reasonably chunk them up: O(KB) is definitely fine, O(MB) come talk to
+    /// us.
+    ///
+    /// The clunky multi-level Result is to enable more obvious error handling
+    /// in the caller. See <http://sled.rs/errors.html> for details.
+    #[instrument(level = "trace", fields(shard = %self.shard_id()))]
+    pub async fn append<SB, KB, VB, TB, DB, I>(
+        &mut self,
+        updates: I,
+        lower: Antichain<T>,
+        upper: Antichain<T>,
+    ) -> Result<Result<(), UpperMismatch<T>>, InvalidUsage<T>>
+    where
+        SB: Borrow<((KB, VB), TB, DB)>,
+        KB: Borrow<K>,
+        VB: Borrow<V>,
+        TB: Borrow<T>,
+        DB: Borrow<D>,
+        I: IntoIterator<Item = SB>,
+        D: Send + Sync,
+    {
+        let batch = self.batch(updates, lower.clone(), upper.clone()).await?;
+        self.append_batch(batch, lower, upper).await
+    }
+
+    /// Applies `updates` to this shard and downgrades this handle's upper to
+    /// `new_upper` iff the current global upper of this shard is
+    /// `expected_upper`.
+    ///
+    /// The innermost `Result` is `Ok` if the updates were successfully written.
+    /// If not, an `Upper` err containing the current global upper is returned.
+    ///
+    /// In contrast to [Self::append], this linearizes mutations from all
+    /// writers. It's intended for use as an atomic primitive for timestamp
+    /// bindings, SQL tables, etc.
+    ///
+    /// All times in `updates` must be greater or equal to `expected_upper` and
+    /// not greater or equal to `new_upper`. A `new_upper` of the empty
+    /// antichain "finishes" this shard, promising that no more data is ever
+    /// incoming.
+    ///
+    /// `updates` may be empty, which allows for downgrading `upper` to
+    /// communicate progress. It is possible to heartbeat a writer lease by
+    /// calling this with `new_upper` equal to `self.upper()` and an empty
+    /// `updates` (making the call a no-op).
+    ///
+    /// This uses a bounded amount of memory, even when `updates` is very large.
+    /// Individual records, however, should be small enough that we can
+    /// reasonably chunk them up: O(KB) is definitely fine, O(MB) come talk to
+    /// us.
+    ///
+    /// The clunky multi-level Result is to enable more obvious error handling
+    /// in the caller. See <http://sled.rs/errors.html> for details.
+    #[instrument(level = "trace", fields(shard = %self.shard_id()))]
+    pub async fn compare_and_append<SB, KB, VB, TB, DB, I>(
+        &mut self,
+        updates: I,
+        expected_upper: Antichain<T>,
+        new_upper: Antichain<T>,
+    ) -> Result<Result<(), UpperMismatch<T>>, InvalidUsage<T>>
+    where
+        SB: Borrow<((KB, VB), TB, DB)>,
+        KB: Borrow<K>,
+        VB: Borrow<V>,
+        TB: Borrow<T>,
+        DB: Borrow<D>,
+        I: IntoIterator<Item = SB>,
+        D: Send + Sync,
+    {
+        let mut batch = self
+            .batch(updates, expected_upper.clone(), new_upper.clone())
+            .await?;
+        match self
+            .compare_and_append_batch(&mut [&mut batch], expected_upper, new_upper)
+            .await
+        {
+            ok @ Ok(Ok(())) => ok,
+            err => {
+                // We cannot delete the batch in compare_and_append_batch()
+                // because the caller owns the batch and might want to retry
+                // with a different `expected_upper`. In this function, we
+                // control the batch, so we have to delete it.
+                batch.delete().await;
+                err
+            }
+        }
+    }
+
     /// Uploads the given `updates` as one `Batch` to the blob store and returns
     /// a handle to the batch.
-    #[instrument(level = "trace", fields(shard = %self.machine.shard_id()))]
+    #[instrument(level = "trace", fields(shard = %self.shard_id()))]
     pub async fn batch<SB, KB, VB, TB, DB, I>(
         &mut self,
         updates: I,
@@ -658,35 +722,6 @@ where
         }
 
         builder.finish(upper.clone()).await
-    }
-
-    /// Blocks until the given `frontier` is less than the upper of the shard.
-    pub async fn wait_for_upper_past(&mut self, frontier: &Antichain<T>) {
-        let mut watch = self.machine.applier.watch();
-        let batch = self
-            .machine
-            .next_listen_batch(frontier, &mut watch, None, None)
-            .await;
-        if PartialOrder::less_than(&self.upper, batch.desc.upper()) {
-            self.upper.clone_from(batch.desc.upper());
-        }
-        assert!(PartialOrder::less_than(frontier, &self.upper));
-    }
-
-    /// Politely expires this writer, releasing any associated state.
-    ///
-    /// There is a best-effort impl in Drop to expire a writer that wasn't
-    /// explictly expired with this method. When possible, explicit expiry is
-    /// still preferred because the Drop one is best effort and is dependant on
-    /// a tokio [Handle] being available in the TLC at the time of drop (which
-    /// is a bit subtle). Also, explicit expiry allows for control over when it
-    /// happens.
-    #[instrument(level = "debug", fields(shard = %self.machine.shard_id()))]
-    pub async fn expire(mut self) {
-        let Some(expire_fn) = self.expire_fn.take() else {
-            return;
-        };
-        expire_fn.0().await;
     }
 
     fn expire_fn(
@@ -778,7 +813,40 @@ where
     }
 }
 
-impl<K: Codec, V: Codec, T, D> Drop for WriteHandle<K, V, T, D> {
+#[async_trait]
+pub trait WriteHandleT<K: Codec, V: Codec, T, D>: Send + Sync + 'static {
+    fn from_read(read: &ReadHandle<K, V, T, D>, purpose: &str) -> Box<dyn WriteHandleT<K, V, T, D>>
+    where
+        Self: Sized;
+    fn shard_id(&self) -> ShardId;
+    fn schema_id(&self) -> Option<SchemaId>;
+    fn upper(&self) -> &Antichain<T>;
+    fn shared_upper(&self) -> Antichain<T>;
+    async fn fetch_recent_upper(&mut self) -> &Antichain<T>;
+    async fn append_batch(
+        &mut self,
+        batch: Batch<K, V, T, D>,
+        lower: Antichain<T>,
+        upper: Antichain<T>,
+    ) -> Result<Result<(), UpperMismatch<T>>, InvalidUsage<T>>
+    where
+        D: Send + Sync;
+    async fn compare_and_append_batch(
+        &mut self,
+        batches: &mut [&mut Batch<K, V, T, D>],
+        expected_upper: Antichain<T>,
+        new_upper: Antichain<T>,
+    ) -> Result<Result<(), UpperMismatch<T>>, InvalidUsage<T>>
+    where
+        D: Send + Sync;
+    fn batch_from_transmittable_batch(&self, batch: ProtoBatch) -> Batch<K, V, T, D>;
+    fn builder(&mut self, lower: Antichain<T>) -> BatchBuilder<K, V, T, D>;
+    async fn wait_for_upper_past(&mut self, frontier: &Antichain<T>);
+    async fn expire(self: Box<Self>);
+    fn as_any(&self) -> &(dyn Any + Send + Sync + 'static);
+}
+
+impl<K: Codec, V: Codec, T, D> Drop for WriteHandleI<K, V, T, D> {
     fn drop(&mut self) {
         let Some(expire_fn) = self.expire_fn.take() else {
             return;
@@ -834,7 +902,8 @@ mod tests {
             .await
             .expect_open::<String, String, u64, i64>(ShardId::new())
             .await;
-        let blob = Arc::clone(&write.blob);
+        // let mut write = WriteHandleI::from(write);
+        let blob = Arc::clone(&write.as_impl().blob);
 
         // Write an initial batch.
         let mut upper = 3;
@@ -888,7 +957,9 @@ mod tests {
             .await;
 
         let batch = write
+            .as_impl()
             .machine
+            .clone()
             .snapshot(&Antichain::from_elem(3))
             .await
             .expect("just wrote this")

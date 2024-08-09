@@ -864,7 +864,7 @@ mod tests {
             .into_hollow_batch();
 
         let req = CompactReq {
-            shard_id: write.machine.shard_id(),
+            shard_id: write.as_impl().machine.shard_id(),
             desc: Description::new(
                 b0.desc.lower().clone(),
                 b1.desc.upper().clone(),
@@ -878,10 +878,14 @@ mod tests {
             val: Arc::new(StringSchema),
         };
         let res = Compactor::<String, String, u64, i64>::compact(
-            CompactConfig::new(&write.cfg, &write.writer_id),
-            Arc::clone(&write.blob),
-            Arc::clone(&write.metrics),
-            write.metrics.shards.shard(&write.machine.shard_id(), ""),
+            CompactConfig::new(&write.as_impl().cfg, &write.as_impl().writer_id),
+            Arc::clone(&write.as_impl().blob),
+            Arc::clone(&write.as_impl().metrics),
+            write
+                .as_impl()
+                .metrics
+                .shards
+                .shard(&write.as_impl().machine.shard_id(), ""),
             Arc::new(IsolatedRuntime::default()),
             req.clone(),
             schemas.clone(),
@@ -897,9 +901,9 @@ mod tests {
             BatchPart::Inline { .. } => panic!("test outputs a hollow part"),
         };
         let (part, updates) = expect_fetch_part(
-            write.blob.as_ref(),
-            &part.key.complete(&write.machine.shard_id()),
-            &write.metrics,
+            write.as_impl().blob.as_ref(),
+            &part.key.complete(&write.as_impl().machine.shard_id()),
+            &write.as_impl().metrics,
             &schemas,
         )
         .await;
@@ -944,7 +948,7 @@ mod tests {
             .into_hollow_batch();
 
         let req = CompactReq {
-            shard_id: write.machine.shard_id(),
+            shard_id: write.as_impl().machine.shard_id(),
             desc: Description::new(
                 b0.desc.lower().clone(),
                 b1.desc.upper().clone(),
@@ -958,10 +962,14 @@ mod tests {
             val: Arc::new(StringSchema),
         };
         let res = Compactor::<String, String, Product<u32, u32>, i64>::compact(
-            CompactConfig::new(&write.cfg, &write.writer_id),
-            Arc::clone(&write.blob),
-            Arc::clone(&write.metrics),
-            write.metrics.shards.shard(&write.machine.shard_id(), ""),
+            CompactConfig::new(&write.as_impl().cfg, &write.as_impl().writer_id),
+            Arc::clone(&write.as_impl().blob),
+            Arc::clone(&write.as_impl().metrics),
+            write
+                .as_impl()
+                .metrics
+                .shards
+                .shard(&write.as_impl().machine.shard_id(), ""),
             Arc::new(IsolatedRuntime::default()),
             req.clone(),
             schemas.clone(),
@@ -977,9 +985,9 @@ mod tests {
             BatchPart::Inline { .. } => panic!("test outputs a hollow part"),
         };
         let (part, updates) = expect_fetch_part(
-            write.blob.as_ref(),
-            &part.key.complete(&write.machine.shard_id()),
-            &write.metrics,
+            write.as_impl().blob.as_ref(),
+            &part.key.complete(&write.as_impl().machine.shard_id()),
+            &write.as_impl().metrics,
             &schemas,
         )
         .await;

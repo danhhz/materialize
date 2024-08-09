@@ -1117,8 +1117,9 @@ mod tests {
         assert_eq!(txns.forget_all(12).await.unwrap().0, forget_expected);
 
         // Close shard to writes
+        let expected = d0_write.shared_upper();
         d0_write
-            .compare_and_append_batch(&mut [], d0_write.shared_upper(), Antichain::new())
+            .compare_and_append_batch(&mut [], expected, Antichain::new())
             .await
             .unwrap()
             .unwrap();
@@ -1130,8 +1131,9 @@ mod tests {
             let mut di_write = writer(&client, di).await;
 
             // Close shards to writes
+            let expected = di_write.shared_upper();
             di_write
-                .compare_and_append_batch(&mut [], di_write.shared_upper(), Antichain::new())
+                .compare_and_append_batch(&mut [], expected, Antichain::new())
                 .await
                 .unwrap()
                 .unwrap();

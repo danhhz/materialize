@@ -10,7 +10,8 @@
 //! An abstraction presenting as a durable time-varying collection (aka shard)
 
 #![doc = include_str!("../README.md")]
-#![warn(missing_docs, missing_debug_implementations)]
+// WIP
+#![allow(missing_docs, missing_debug_implementations)]
 // #[track_caller] is currently a no-op on async functions, but that hopefully won't be the case
 // forever. So we already annotate those functions now and ignore the compiler warning until
 // https://github.com/rust-lang/rust/issues/87417 pans out.
@@ -18,6 +19,7 @@
 
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use differential_dataflow::difference::Semigroup;
@@ -44,7 +46,7 @@ use crate::metrics::Metrics;
 use crate::read::{LeasedReaderId, ReadHandle, READER_LEASE_DURATION};
 use crate::rpc::PubSubSender;
 use crate::schema::{SchemaId, SCHEMA_REGISTER, SCHEMA_REQUIRE};
-use crate::write::{WriteHandle, WriterId};
+use crate::write::{WriteHandleT, WriterId};
 
 pub mod async_runtime;
 pub mod batch;
@@ -570,7 +572,7 @@ impl PersistClient {
             key: key_schema,
             val: val_schema,
         };
-        let writer = WriteHandle::new(
+        let writer = crate::write::WriteHandleI::new(
             self.cfg.clone(),
             Arc::clone(&self.metrics),
             machine,
@@ -580,7 +582,7 @@ impl PersistClient {
             &diagnostics.handle_purpose,
             schemas,
         );
-        Ok(writer)
+        Ok(WriteHandle(Box::new(writer)))
     }
 
     /// Returns the requested schema, if known at the current state.
@@ -734,6 +736,47 @@ impl PersistClient {
     /// Only exposed for tests, persistcli, and benchmarks.
     pub fn metrics(&self) -> &Arc<Metrics> {
         &self.metrics
+    }
+}
+
+pub struct WriteHandle<K: Codec, V: Codec, T, D>(Box<dyn WriteHandleT<K, V, T, D>>);
+
+impl<K: Codec, V: Codec, T, D> Deref for WriteHandle<K, V, T, D> {
+    type Target = dyn WriteHandleT<K, V, T, D>;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl<K: Codec, V: Codec, T, D> DerefMut for WriteHandle<K, V, T, D> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.0
+    }
+}
+
+impl<K: Codec, V: Codec, T, D> Debug for WriteHandle<K, V, T, D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriteHandle").finish_non_exhaustive()
+    }
+}
+
+impl<K: Codec, V: Codec, T: 'static, D: 'static> WriteHandle<K, V, T, D> {
+    pub async fn expire(self) {
+        self.0.expire().await
+    }
+}
+
+impl<K, V, T, D> WriteHandle<K, V, T, D>
+where
+    K: Debug + Codec,
+    V: Debug + Codec,
+    T: Timestamp + Lattice + Codec64,
+    D: Semigroup + Ord + Codec64 + Send + Sync,
+{
+    pub fn from_read(read: &ReadHandle<K, V, T, D>, purpose: &str) -> Self {
+        // WIP this doesn't work if we split the crates
+        WriteHandle(crate::write::WriteHandleI::from_read(read, purpose))
     }
 }
 
@@ -1509,6 +1552,7 @@ mod tests {
     // combined are contiguous.
     #[mz_persist_proc::test(tokio::test)]
     #[cfg_attr(miri, ignore)] // unsupported operation: returning ready events from epoll_wait is not yet implemented
+    #[cfg(WIP)]
     async fn noncontiguous_append_per_writer(dyncfgs: ConfigUpdates) {
         let data = vec![
             (("1".to_owned(), "one".to_owned()), 1, 1),

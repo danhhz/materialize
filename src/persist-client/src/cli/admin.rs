@@ -41,9 +41,10 @@ use crate::internal::gc::{GarbageCollector, GcReq};
 use crate::internal::machine::Machine;
 use crate::internal::trace::FueledMergeRes;
 use crate::rpc::{NoopPubSubSender, PubSubSender};
-use crate::write::{WriteHandle, WriterId};
+use crate::write::WriterId;
 use crate::{
-    Diagnostics, Metrics, PersistClient, PersistConfig, ShardId, StateVersions, BUILD_INFO,
+    Diagnostics, Metrics, PersistClient, PersistConfig, ShardId, StateVersions, WriteHandle,
+    BUILD_INFO,
 };
 
 /// Commands for read-write administration of persist state

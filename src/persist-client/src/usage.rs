@@ -766,14 +766,14 @@ mod tests {
             .expect_open::<String, String, u64, i64>(shard_id_two)
             .await;
         write.expect_append(&data[1..3], vec![0], vec![4]).await;
-        let writer_one = WriterKey::Id(write.writer_id.clone());
+        let writer_one = WriterKey::Id(write.as_impl().writer_id.clone());
 
         // write one row into shard 2 from writer 2
         let (mut write, _) = client
             .expect_open::<String, String, u64, i64>(shard_id_two)
             .await;
         write.expect_append(&data[4..], vec![0], vec![5]).await;
-        let writer_two = WriterKey::Id(write.writer_id.clone());
+        let writer_two = WriterKey::Id(write.as_impl().writer_id.clone());
 
         let usage = StorageUsageClient::open(client);
 
@@ -893,8 +893,15 @@ mod tests {
         write1.expire().await;
 
         // Write a rollup that has an encoded size (the initial rollup has size 0);
-        let maintenance = write0.machine.add_rollup_for_current_seqno().await;
-        maintenance.perform(&write0.machine, &write0.gc).await;
+        let maintenance = write0
+            .as_impl()
+            .machine
+            .clone()
+            .add_rollup_for_current_seqno()
+            .await;
+        maintenance
+            .perform(&write0.as_impl().machine, &write0.as_impl().gc)
+            .await;
 
         client.cfg.build_version.minor += 1;
         let usage = StorageUsageClient::open(client);
@@ -952,19 +959,19 @@ mod tests {
         let mut b1 = write.expect_batch(&data[..2], 0, 3).await;
         let mut b2 = write.expect_batch(&data[2..], 2, 5).await;
         if backpressure_would_flush {
-            let cfg = BatchBuilderConfig::new(&client.cfg, &write.writer_id);
+            let cfg = BatchBuilderConfig::new(&client.cfg, &write.as_impl().writer_id);
             b1.flush_to_blob(
                 &cfg,
                 &client.metrics.user,
                 &client.isolated_runtime,
-                &write.schemas,
+                &write.as_impl().schemas,
             )
             .await;
             b2.flush_to_blob(
                 &cfg,
                 &client.metrics.user,
                 &client.isolated_runtime,
-                &write.schemas,
+                &write.as_impl().schemas,
             )
             .await;
         }
