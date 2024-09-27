@@ -130,6 +130,8 @@ pub enum DataSourceOther {
     TableWrites,
     /// Compute maintains, i.e. it is a `MATERIALIZED VIEW`.
     Compute,
+    /// A shard maintained outside of storage.
+    Shard(ShardId),
 }
 
 /// Describes a request to create a source.
@@ -732,7 +734,7 @@ impl DataSource {
     pub fn in_txns(&self) -> bool {
         match self {
             DataSource::Other(DataSourceOther::TableWrites) => true,
-            DataSource::Other(DataSourceOther::Compute)
+            DataSource::Other(DataSourceOther::Compute | DataSourceOther::Shard(_))
             | DataSource::Ingestion(_)
             | DataSource::IngestionExport { .. }
             | DataSource::Introspection(_)

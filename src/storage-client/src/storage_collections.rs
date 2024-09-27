@@ -809,9 +809,10 @@ where
         let dependencies = match &data_source {
             DataSource::Introspection(_)
             | DataSource::Webhook
-            | DataSource::Other(DataSourceOther::TableWrites)
-            | DataSource::Progress
-            | DataSource::Other(DataSourceOther::Compute) => Vec::new(),
+            | DataSource::Other(
+                DataSourceOther::TableWrites | DataSourceOther::Compute | DataSourceOther::Shard(_),
+            )
+            | DataSource::Progress => Vec::new(),
             DataSource::IngestionExport { ingestion_id, .. } => {
                 // Ingestion exports depend on their primary source's remap
                 // collection.
@@ -1378,6 +1379,17 @@ where
             .into_iter()
             .map(|(id, description)| {
                 let data_shard = storage_metadata.get_collection_shard::<T>(id)?;
+                // For a shard managed outside storage, sanity check that the
+                // `CollectionMetdata::data_shard` agrees with the one declared
+                // in `DataSourceOther::Shard`.
+                match &description.data_source {
+                    DataSource::Other(DataSourceOther::Shard(x)) if *x != data_shard => {
+                        let err =
+                            format!("shard DataSource {x} did not match metadata {data_shard}");
+                        return Err(StorageError::InvalidUsage(err));
+                    }
+                    _ => {}
+                };
 
                 let get_shard = |id| -> Result<ShardId, StorageError<T>> {
                     let shard = storage_metadata.get_collection_shard::<T>(id)?;
@@ -1473,7 +1485,7 @@ where
                     | DataSource::Webhook
                     | DataSource::Ingestion(_)
                     | DataSource::Progress
-                    | DataSource::Other(DataSourceOther::Compute) => {},
+                    | DataSource::Other(DataSourceOther::Compute | DataSourceOther::Shard(_)) => {},
                     DataSource::Other(DataSourceOther::TableWrites) => {
                         let register_ts = register_ts.expect("caller should have provided a register_ts when creating a table");
                         if since_handle.since().elements() == &[T::minimum()] && !migrated_storage_collections.contains(&id) {
@@ -1652,7 +1664,8 @@ where
                     }
                     self_collections.insert(id, collection_state);
                 }
-                DataSource::Progress | DataSource::Other(DataSourceOther::Compute) => {
+                DataSource::Progress
+                | DataSource::Other(DataSourceOther::Compute | DataSourceOther::Shard(_)) => {
                     self_collections.insert(id, collection_state);
                 }
                 DataSource::Ingestion(_) => {

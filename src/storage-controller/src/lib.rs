@@ -721,7 +721,8 @@ where
                     self.collections.insert(id, collection_state);
                     table_registers.push((id, write));
                 }
-                DataSource::Progress | DataSource::Other(DataSourceOther::Compute) => {
+                DataSource::Progress
+                | DataSource::Other(DataSourceOther::Compute | DataSourceOther::Shard(_)) => {
                     debug!(data_source = ?collection_state.data_source, meta = ?metadata, "not registering {} with a controller persist worker", id);
                     self.collections.insert(id, collection_state);
                 }
@@ -2941,9 +2942,10 @@ where
         let dependency = match &data_source {
             DataSource::Introspection(_)
             | DataSource::Webhook
-            | DataSource::Other(DataSourceOther::TableWrites)
-            | DataSource::Progress
-            | DataSource::Other(DataSourceOther::Compute) => vec![],
+            | DataSource::Other(
+                DataSourceOther::TableWrites | DataSourceOther::Compute | DataSourceOther::Shard(_),
+            )
+            | DataSource::Progress => vec![],
             DataSource::IngestionExport { ingestion_id, .. } => {
                 // Ingestion exports depend on their primary source's remap
                 // collection.
