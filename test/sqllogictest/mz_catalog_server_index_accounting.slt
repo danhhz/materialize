@@ -326,6 +326,16 @@ mz_console_cluster_utilization_overview  name
 mz_console_cluster_utilization_overview  offline_events
 mz_console_cluster_utilization_overview  replica_id
 mz_console_cluster_utilization_overview  size
+mz_continual_tasks  cluster_id
+mz_continual_tasks  create_sql
+mz_continual_tasks  definition
+mz_continual_tasks  id
+mz_continual_tasks  name
+mz_continual_tasks  oid
+mz_continual_tasks  owner_id
+mz_continual_tasks  privileges
+mz_continual_tasks  redacted_create_sql
+mz_continual_tasks  schema_id
 mz_databases  id
 mz_databases  name
 mz_databases  oid

@@ -361,6 +361,7 @@ table
 source
 view
 materialized-view
+continual-task
 sink
 index
 connection
