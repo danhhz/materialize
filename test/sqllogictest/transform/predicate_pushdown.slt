@@ -441,8 +441,6 @@ Explained Query:
               Map ("materialized-view") // { arity: 11 }
                 ReadIndex on=mz_materialized_views mz_materialized_views_ind=[*** full scan ***] // { arity: 10 }
 
-Source mz_internal.mz_continual_tasks
-
 Used Indexes:
   - mz_catalog.mz_materialized_views_ind (*** full scan ***)
   - mz_catalog.mz_schemas_ind (*** full scan ***)
